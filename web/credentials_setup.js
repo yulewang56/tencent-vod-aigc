@@ -72,7 +72,7 @@ function showSetupModal(existingPrices) {
   const subAppId = input("text", "SubAppId（纯数字）");
 
   const section = document.createElement("div");
-  section.textContent = "单价（选填，元/秒，用于台账费用预估）";
+  section.textContent = "单价（元/秒）(optional) —— 用于台账费用预估";
   section.style.cssText = "margin:14px 0 2px;color:#a8a8b0;font-size:12px";
 
   const RES = ["768P", "1080P", "2K", "4K"];
@@ -153,8 +153,8 @@ function showSetupModal(existingPrices) {
 
   laterBtn.addEventListener("click", () => overlay.remove());
 
-  box.append(title, desc, label("SecretId"), secretId, label("SecretKey"), secretKey,
-    label("SubAppId"), subAppId, section, errorLine, buttons);
+  box.append(title, desc, label("SecretId", true), secretId, label("SecretKey", true), secretKey,
+    label("SubAppId", true), subAppId, section, errorLine, buttons);
   buttons.append(saveBtn, laterBtn);
   overlay.appendChild(box);
   document.body.appendChild(overlay);
