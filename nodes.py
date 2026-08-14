@@ -7,6 +7,7 @@
 """
 
 import base64
+import functools
 import hashlib
 import hmac
 import io
@@ -260,6 +261,57 @@ def _download_video(url: str, task_id: str, on_progress=None) -> str:
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         raise RuntimeError(f"视频下载失败（{e}）。可手动下载: {url}")
     return path
+
+
+# ---------------------------------------------------------------- 执行台账
+
+def _append_history(record: dict):
+    """把一条执行记录追加到 output/vod_aigc/execution_history.jsonl（成功/失败都记）。"""
+    try:
+        from comfy import folder_paths
+        out_dir = os.path.join(folder_paths.get_output_directory(), "vod_aigc")
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, "execution_history.jsonl")
+        record.setdefault("time", time.strftime("%Y-%m-%dT%H:%M:%S%z"))
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception as e:  # 台账写入失败不影响生成主流程
+        print(f"[tencent-vod-aigc] 执行台账写入失败: {e}")
+
+
+def _base_record(mode: str, prompt: str, kwargs: dict, task_id="", url="", path="", error=""):
+    """构造台账记录：含计费要素（时长/分辨率/音频/存储方式），便于成本审计。"""
+    return {
+        "mode": mode,
+        "task_id": task_id,
+        "status": "failure" if error else "success",
+        "prompt": (prompt or "")[:200],
+        "duration": int(kwargs.get("duration") or 0),
+        "resolution": kwargs.get("resolution") or "",
+        "aspect_ratio": kwargs.get("aspect_ratio") or "",
+        "audio_generation": kwargs.get("audio_generation") or "",
+        "storage_mode": kwargs.get("storage_mode") or "",
+        "enhance_prompt": kwargs.get("enhance_prompt") or "",
+        "video_url": url,
+        "video_path": path,
+        "error": (error or "")[:500],
+    }
+
+
+def _ledger(mode: str):
+    """生成节点装饰器：成功/失败都写执行台账；失败原样抛出。"""
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(self, prompt, **kwargs):
+            try:
+                task_id, url, path = fn(self, prompt, **kwargs)
+                _append_history(_base_record(mode, prompt, kwargs, task_id, url, path))
+                return (task_id, url, path)
+            except Exception as e:
+                _append_history(_base_record(mode, prompt, kwargs, error=str(e)))
+                raise
+        return wrapper
+    return deco
 
 
 # ---------------------------------------------------------------- 输入模板
@@ -606,6 +658,11 @@ class TencentVODAIGCDownloadVideo:
         _set_status(self, "完成")
         return (path,)
 
+
+# 三个生成节点接入执行台账：成功/失败都落盘一条 JSONL 记录
+TencentVODH3TextToVideo.generate = _ledger("t2v")(TencentVODH3TextToVideo.generate)
+TencentVODH3ImageToVideo.generate = _ledger("i2v")(TencentVODH3ImageToVideo.generate)
+TencentVODH3ReferenceToVideo.generate = _ledger("r2v")(TencentVODH3ReferenceToVideo.generate)
 
 NODE_CLASS_MAPPINGS = {
     "TencentVODH3TextToVideo": TencentVODH3TextToVideo,

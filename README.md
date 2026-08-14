@@ -15,6 +15,17 @@ ComfyUI 自定义节点：通过**腾讯云 VOD AIGC** 聚合服务调用 **Mini
 | `VOD AIGC - 查询任务` | 按 TaskId 查状态（超时/失败排查用） |
 | `VOD AIGC - 下载视频` | 按 URL 重新下载视频 |
 
+## 执行台账（v1.1）
+
+三个生成节点每次运行（成功或失败）都会追加一条 JSON 记录到
+`output/vod_aigc/execution_history.jsonl`，含时间、TaskId、提示词、
+计费要素（时长/分辨率/音频/存储方式）与产物路径——可作成本审计与
+生成追溯，用文本编辑器、Excel 或 `jq` 均可查询：
+
+```bash
+jq -r '.[] | [.time, .status, .resolution, .duration] | @tsv' output/vod_aigc/execution_history.jsonl
+```
+
 ## 安装（git clone）
 
 ```bash
