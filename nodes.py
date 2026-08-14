@@ -210,7 +210,8 @@ def _wait_for_task(secret_id, secret_key, region, endpoint, sub_app_id, task_id,
     while True:
         response = _call_api(secret_id, secret_key, region, endpoint, "DescribeTaskDetail",
                              {"SubAppId": int(sub_app_id), "TaskId": task_id})
-        detail = response.get("TaskDetail") or {}
+        # 真实响应把任务详情平铺在 Response 顶层（部分文档描述为嵌套在 TaskDetail，两者都兼容）
+        detail = response.get("TaskDetail") or response
         status, err_code, message, urls = _extract_task_result(detail)
         if status in ("SUCCESS", "FINISH"):
             if not urls:
@@ -560,7 +561,8 @@ class TencentVODAIGCQueryTask:
         endpoint = kwargs.get("endpoint") or ""
         response = _call_api(secret_id, secret_key, region, endpoint, "DescribeTaskDetail",
                              {"SubAppId": int(sub_app_id), "TaskId": task_id.strip()})
-        detail = response.get("TaskDetail") or {}
+        # 真实响应把任务详情平铺在 Response 顶层（部分文档描述为嵌套在 TaskDetail，两者都兼容）
+        detail = response.get("TaskDetail") or response
         status, _, _, urls = _extract_task_result(detail)
         return (status or "UNKNOWN", "\n".join(urls), json.dumps(detail, ensure_ascii=False, indent=2))
 
