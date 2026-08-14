@@ -26,6 +26,12 @@ ComfyUI 自定义节点：通过**腾讯云 VOD AIGC** 聚合服务调用 **Mini
 jq -r '.[] | [.time, .status, .resolution, .duration] | @tsv' output/vod_aigc/execution_history.jsonl
 ```
 
+## 台账显示（v1.3.0）
+
+「VOD AIGC - 查看执行台账」节点执行完成后，台账文本会以**右下角浮窗**显示
+（双击浮窗外的「×」关闭）。浮窗由节点包内置的前端扩展渲染——ComfyUI
+原生的 Job History 面板不显示纯文本输出，这是社区标准做法。
+
 ## 安装（git clone）
 
 ```bash
