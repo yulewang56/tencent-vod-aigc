@@ -226,8 +226,12 @@ def _wait_for_task(secret_id, secret_key, region, endpoint, sub_app_id, task_id,
         time.sleep(max(1, int(poll_interval)))
 
 
-def _download_video(url: str, task_id: str) -> str:
-    """把生成的视频下载到 ComfyUI output/vod_aigc/ 目录。"""
+def _download_video(url: str, task_id: str, on_progress=None) -> str:
+    """把生成的视频下载到 ComfyUI output/vod_aigc/ 目录。
+
+    流式下载 + 60s 超时 + 进度回调；失败时抛出包含可手动下载 URL 的错误，
+    避免阻塞线程导致整个 ComfyUI 无法中断。
+    """
     from comfy import folder_paths
 
     out_dir = os.path.join(folder_paths.get_output_directory(), "vod_aigc")
@@ -235,7 +239,25 @@ def _download_video(url: str, task_id: str) -> str:
     original = os.path.basename(urllib.parse.urlparse(url).path) or "aigcVideoGenFile.mp4"
     name = f"{task_id[-8:]}_{original}"
     path = os.path.join(out_dir, name)
-    urllib.request.urlretrieve(url, path)
+
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp, open(path, "wb") as f:
+            total = int(resp.headers.get("Content-Length") or 0)
+            downloaded = 0
+            while True:
+                chunk = resp.read(256 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+                downloaded += len(chunk)
+                if on_progress:
+                    pct = f"{downloaded / total * 100:.0f}%" if total else f"{downloaded // (1024 * 1024)}MB"
+                    on_progress(f"下载中… {pct}")
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"视频下载失败 HTTP {e.code}。可手动下载: {url}")
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        raise RuntimeError(f"视频下载失败（{e}）。可手动下载: {url}")
     return path
 
 
@@ -331,7 +353,7 @@ class TencentVODH3TextToVideo:
                                 on_progress=lambda t: _set_status(self, t))
         url = result["urls"][0]
         _set_status(self, "下载视频…")
-        path = _download_video(url, task_id)
+        path = _download_video(url, task_id, on_progress=lambda t: _set_status(self, t))
         _set_status(self, "完成")
         return (task_id, url, path)
 
@@ -399,7 +421,7 @@ class TencentVODH3ImageToVideo:
                                 on_progress=lambda t: _set_status(self, t))
         url = result["urls"][0]
         _set_status(self, "下载视频…")
-        path = _download_video(url, task_id)
+        path = _download_video(url, task_id, on_progress=lambda t: _set_status(self, t))
         _set_status(self, "完成")
         return (task_id, url, path)
 
@@ -503,7 +525,7 @@ class TencentVODH3ReferenceToVideo:
                                 on_progress=lambda t: _set_status(self, t))
         url = result["urls"][0]
         _set_status(self, "下载视频…")
-        path = _download_video(url, task_id)
+        path = _download_video(url, task_id, on_progress=lambda t: _set_status(self, t))
         _set_status(self, "完成")
         return (task_id, url, path)
 
