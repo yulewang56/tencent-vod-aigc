@@ -26,6 +26,16 @@ ComfyUI 自定义节点：通过**腾讯云 VOD AIGC** 聚合服务调用 **Mini
 jq -r '.[] | [.time, .status, .resolution, .duration] | @tsv' output/vod_aigc/execution_history.jsonl
 ```
 
+## 首次使用弹窗 + 测试入库（v1.6.0）
+
+- **首次使用弹窗**：在画布上添加任一生成/查询节点且凭据未配置时，右下弹出设置框，填写后一键写入
+  `credentials.json`（走本地 HTTP 接口，密钥不进入工作流 JSON）；每会话只弹一次
+- **凭据字段提示**：SecretId / SecretKey / SubAppId 工具提示标注「选填」，说明默认读取 credentials.json
+- **测试入库**：`tests/test_nodes.py` 随仓库分发，65 项自包含测试（已脱敏，无真实凭据）：
+  ```bash
+  python tests/test_nodes.py        # 无需安装任何依赖（自带 ComfyUI/numpy/PIL stub）
+  ```
+
 ## 凭据一次配置（v1.5.0）
 
 节点上的 secret_id / secret_key / sub_app_id **全部留空**即可——解析优先级：

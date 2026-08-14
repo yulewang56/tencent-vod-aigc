@@ -163,6 +163,55 @@ def _resolve_credentials(secret_id, secret_key, sub_app_id):
     return sid, skey, sub
 
 
+def _credentials_configured() -> bool:
+    """凭据是否已可解析（文件或环境变量任一可用即视为已配置，供前端弹窗判断）。"""
+    file_creds = _load_credentials_file()
+    file_ok = bool(file_creds.get("secret_id") and file_creds.get("secret_key") and file_creds.get("sub_app_id"))
+    env_ok = bool(os.environ.get("TENCENTCLOUD_SECRET_ID") and os.environ.get("TENCENTCLOUD_SECRET_KEY")
+                  and os.environ.get("VOD_SUB_APP_ID"))
+    return file_ok or env_ok
+
+
+def _save_credentials_file(secret_id, secret_key, sub_app_id, path=None) -> str:
+    """校验并写入 credentials.json（首次使用弹窗保存用），返回文件路径。"""
+    sid, skey, sub = (secret_id or "").strip(), (secret_key or "").strip(), (sub_app_id or "").strip()
+    if not sid or not skey:
+        raise ValueError("SecretId 与 SecretKey 不能为空")
+    if not sub.isdigit():
+        raise ValueError(f"SubAppId 必须为纯数字，当前值: {sub}")
+    path = path or os.path.join(os.path.dirname(os.path.abspath(__file__)), "credentials.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"secret_id": sid, "secret_key": skey, "sub_app_id": sub}, f, indent=2, ensure_ascii=False)
+    return path
+
+
+def _register_http_routes():
+    """注册凭据状态查询 / 保存接口，供前端首次使用弹窗调用（非 ComfyUI 环境自动跳过）。"""
+    try:
+        from aiohttp import web
+        from server import PromptServer
+    except Exception:
+        return
+    routes = PromptServer.instance.routes
+
+    @routes.get("/tencent-vod-aigc/credentials/status")
+    async def credentials_status(_request):
+        return web.json_response({"configured": _credentials_configured()})
+
+    @routes.post("/tencent-vod-aigc/credentials")
+    async def credentials_save(request):
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "请求体不是合法 JSON"}, status=400)
+        try:
+            path = _save_credentials_file(body.get("secret_id", ""), body.get("secret_key", ""),
+                                          body.get("sub_app_id", ""))
+        except ValueError as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=400)
+        return web.json_response({"ok": True, "path": path})
+
+
 # ---------------------------------------------------------------- 工具函数
 
 def _set_status(node, text: str):
@@ -387,9 +436,9 @@ def _ledger(mode: str):
 
 def _cred_inputs():
     return {
-        "secret_id": ("STRING", {"default": "", "tooltip": "腾讯云 CAM SecretId。留空则依次回退环境变量 TENCENTCLOUD_SECRET_ID 与节点包内 credentials.json（推荐，避免密钥进工作流 JSON）"}),
-        "secret_key": ("STRING", {"default": "", "tooltip": "腾讯云 CAM SecretKey。留空则依次回退环境变量 TENCENTCLOUD_SECRET_KEY 与 credentials.json"}),
-        "sub_app_id": ("STRING", {"default": "", "tooltip": "VOD 应用 ID。留空则依次回退环境变量 VOD_SUB_APP_ID 与 credentials.json"}),
+        "secret_id": ("STRING", {"default": "", "tooltip": "（选填）腾讯云 CAM SecretId。留空则自动读取环境变量 TENCENTCLOUD_SECRET_ID 或节点包内 credentials.json，建议留空以免密钥写入工作流 JSON"}),
+        "secret_key": ("STRING", {"default": "", "tooltip": "（选填）腾讯云 CAM SecretKey。留空则自动读取环境变量 TENCENTCLOUD_SECRET_KEY 或 credentials.json"}),
+        "sub_app_id": ("STRING", {"default": "", "tooltip": "（选填）VOD 应用 ID。留空则自动读取环境变量 VOD_SUB_APP_ID 或 credentials.json"}),
     }
 
 
@@ -800,3 +849,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "TencentVODAIGCDownloadVideo": "VOD AIGC - 下载视频",
     "TencentVODAIGCViewHistory": "VOD AIGC - 查看执行台账",
 }
+
+
+_register_http_routes()  # 首次使用弹窗的凭据状态/保存接口（非 ComfyUI 环境自动跳过）
