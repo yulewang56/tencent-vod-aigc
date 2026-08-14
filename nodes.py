@@ -128,52 +128,48 @@ def _call_api(secret_id: str, secret_key: str, region: str, endpoint: str, actio
 
 
 _CONFIG_FILE = "tencent-vod-config.json"
-_LEGACY_CRED_FILE = "credentials.json"
 _CRED_FILE_HINT = ("custom_nodes/tencent-vod-aigc/tencent-vod-config.json"
                    "（模板见同目录 tencent-vod-config.example.json）")
 
 
 def _load_config_file(dir_path=None):
-    """读取统一配置文件 tencent-vod-config.json；不存在时兼容旧版 credentials.json。
+    """读取统一配置文件 tencent-vod-config.json。
 
     返回 {"secret_id", "secret_key", "sub_app_id", "prices": {分辨率: 单价}}，
     文件缺失/损坏返回空结构。
     """
     base = dir_path or os.path.dirname(os.path.abspath(__file__))
-    for name in (_CONFIG_FILE, _LEGACY_CRED_FILE):
-        try:
-            with open(os.path.join(base, name), "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except FileNotFoundError:
-            continue
-        except Exception as e:
-            print(f"[tencent-vod-aigc] {name} 读取失败（忽略）: {e}")
-            continue
-        result = {k: str(data.get(k) or "").strip() for k in ("secret_id", "secret_key", "sub_app_id")}
-        result["prices"] = {}
-        prices = data.get("prices")
-        if isinstance(prices, dict):
-            for k, v in prices.items():
-                try:
-                    result["prices"][k] = float(v)
-                except (TypeError, ValueError):
-                    pass
-        return result
-    return {"secret_id": "", "secret_key": "", "sub_app_id": "", "prices": {}}
+    try:
+        with open(os.path.join(base, _CONFIG_FILE), "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        data = {}
+    except Exception as e:
+        print(f"[tencent-vod-aigc] {_CONFIG_FILE} 读取失败（忽略）: {e}")
+        data = {}
+    result = {k: str(data.get(k) or "").strip() for k in ("secret_id", "secret_key", "sub_app_id")}
+    result["prices"] = {}
+    prices = data.get("prices")
+    if isinstance(prices, dict):
+        for k, v in prices.items():
+            try:
+                result["prices"][k] = float(v)
+            except (TypeError, ValueError):
+                pass
+    return result
 
 
 def _resolve_credentials(secret_id, secret_key, sub_app_id):
-    """凭据解析优先级：节点输入 > 环境变量 > tencent-vod-config.json。"""
+    """凭据解析优先级：节点输入 > tencent-vod-config.json。"""
     file_creds = _load_config_file()
-    sid = (secret_id or "").strip() or os.environ.get("TENCENTCLOUD_SECRET_ID", "").strip() or file_creds.get("secret_id")
-    skey = (secret_key or "").strip() or os.environ.get("TENCENTCLOUD_SECRET_KEY", "").strip() or file_creds.get("secret_key")
-    sub = (sub_app_id or "").strip() or os.environ.get("VOD_SUB_APP_ID", "").strip() or file_creds.get("sub_app_id")
+    sid = (secret_id or "").strip() or file_creds.get("secret_id")
+    skey = (secret_key or "").strip() or file_creds.get("secret_key")
+    sub = (sub_app_id or "").strip() or file_creds.get("sub_app_id")
     if not sid or not skey:
-        raise ValueError("缺少腾讯云密钥：请在节点填写 SecretId / SecretKey，设置环境变量 "
-                         "TENCENTCLOUD_SECRET_ID / TENCENTCLOUD_SECRET_KEY，或配置 "
+        raise ValueError("缺少腾讯云密钥：请在节点填写 SecretId / SecretKey，或配置 "
                          + _CRED_FILE_HINT)
     if not sub:
-        raise ValueError("缺少 SubAppId：请在节点填写，设置环境变量 VOD_SUB_APP_ID，或配置 "
+        raise ValueError("缺少 SubAppId：请在节点填写，或配置 "
                          + _CRED_FILE_HINT)
     if not sub.isdigit():
         raise ValueError(f"SubAppId 必须为纯数字，当前值: {sub}")
@@ -181,12 +177,9 @@ def _resolve_credentials(secret_id, secret_key, sub_app_id):
 
 
 def _credentials_configured() -> bool:
-    """凭据是否已可解析（文件或环境变量任一可用即视为已配置，供前端弹窗判断）。"""
+    """凭据是否已配置（tencent-vod-config.json 三项齐全），供前端弹窗判断。"""
     file_creds = _load_config_file()
-    file_ok = bool(file_creds.get("secret_id") and file_creds.get("secret_key") and file_creds.get("sub_app_id"))
-    env_ok = bool(os.environ.get("TENCENTCLOUD_SECRET_ID") and os.environ.get("TENCENTCLOUD_SECRET_KEY")
-                  and os.environ.get("VOD_SUB_APP_ID"))
-    return file_ok or env_ok
+    return bool(file_creds.get("secret_id") and file_creds.get("secret_key") and file_creds.get("sub_app_id"))
 
 
 def _save_config_file(secret_id, secret_key, sub_app_id, prices=None, path=None) -> str:
@@ -213,10 +206,7 @@ def _save_config_file(secret_id, secret_key, sub_app_id, prices=None, path=None)
 
 
 def _register_http_routes():
-    """注册配置状态查询 / 保存接口，供前端首次使用弹窗调用（非 ComfyUI 环境自动跳过）。
-
-    规范路径 /tencent-vod-aigc/config；/credentials/* 为旧版别名（兼容旧前端缓存）。
-    """
+    """注册配置状态查询 / 保存接口，供前端首次使用弹窗调用（非 ComfyUI 环境自动跳过）。"""
     try:
         from aiohttp import web
         from server import PromptServer
@@ -242,9 +232,7 @@ def _register_http_routes():
         return web.json_response({"ok": True, "path": path})
 
     routes.get("/tencent-vod-aigc/config")(config_status)
-    routes.get("/tencent-vod-aigc/credentials/status")(config_status)  # 旧版别名
     routes.post("/tencent-vod-aigc/config")(config_save)
-    routes.post("/tencent-vod-aigc/credentials")(config_save)          # 旧版别名
 
 
 # ---------------------------------------------------------------- 工具函数
@@ -405,13 +393,7 @@ _MIN_BILLED_SECONDS = 5  # 每次任务不足 5 秒按 5 秒计费
 
 
 def _price_for(resolution: str) -> float:
-    """单价（元/秒）解析：环境变量 VOD_PRICE_<分辨率> > tencent-vod-config.json prices > 0。"""
-    env = os.environ.get(f"VOD_PRICE_{str(resolution or '').upper()}")
-    if env is not None and env.strip():
-        try:
-            return float(env.strip())
-        except ValueError:
-            pass
+    """单价（元/秒）解析：tencent-vod-config.json prices，未配置返回 0。"""
     try:
         return float(_load_config_file().get("prices", {}).get(resolution, 0.0))
     except (TypeError, ValueError):
@@ -479,11 +461,11 @@ def _cred_inputs():
     """凭据输入模板：display_name 为前端显示名（可选标记），键名保持 secret_id 不变。"""
     return {
         "secret_id": ("STRING", {"default": "", "display_name": "secret_id (optional)",
-                                 "tooltip": "（选填）腾讯云 CAM SecretId。留空则自动读取环境变量 TENCENTCLOUD_SECRET_ID 或节点包内 credentials.json，建议留空以免密钥写入工作流 JSON"}),
+                                 "tooltip": "（选填）腾讯云 CAM SecretId。留空则自动读取节点包内 tencent-vod-config.json，建议留空以免密钥写入工作流 JSON"}),
         "secret_key": ("STRING", {"default": "", "display_name": "secret_key (optional)",
-                                  "tooltip": "（选填）腾讯云 CAM SecretKey。留空则自动读取环境变量 TENCENTCLOUD_SECRET_KEY 或 credentials.json"}),
+                                  "tooltip": "（选填）腾讯云 CAM SecretKey。留空则自动读取节点包内 tencent-vod-config.json"}),
         "sub_app_id": ("STRING", {"default": "", "display_name": "sub_app_id (optional)",
-                                  "tooltip": "（选填）VOD 应用 ID。留空则自动读取环境变量 VOD_SUB_APP_ID 或 credentials.json"}),
+                                  "tooltip": "（选填）VOD 应用 ID。留空则自动读取节点包内 tencent-vod-config.json"}),
     }
 
 

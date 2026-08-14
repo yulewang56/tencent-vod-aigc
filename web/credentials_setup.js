@@ -46,7 +46,7 @@ function showSetupModal(existingPrices) {
   const desc = document.createElement("div");
   desc.style.cssText = "color:#a8a8b0;margin-bottom:6px";
   desc.innerHTML =
-    "节点上的凭据字段均为选填（留空自动读取配置文件或环境变量）。在这里填写一次，密钥只保存到 " +
+    "节点上的凭据字段均为选填（留空自动读取配置文件）。在这里填写一次，密钥只保存到 " +
     "<code>custom_nodes/tencent-vod-aigc/tencent-vod-config.json</code>（已 gitignore，不会进入工作流 JSON）。" +
     "下方单价用于台账费用预估（元/秒），可留空。";
 

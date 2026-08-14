@@ -111,9 +111,6 @@ check("poll loop returns urls", result["urls"] == ["https://cdn/aigcVideoGenFile
 check("poll loop calls describe 3 times", len(calls) == 4, str(calls))
 
 # ---- 6. credentials resolution ----
-os.environ.pop("TENCENTCLOUD_SECRET_ID", None)
-os.environ.pop("TENCENTCLOUD_SECRET_KEY", None)
-os.environ.pop("VOD_SUB_APP_ID", None)
 orig_load = nodes._load_config_file
 nodes._load_config_file = lambda: {}
 try:
@@ -124,11 +121,7 @@ except ValueError as e:
 nodes._load_config_file = orig_load
 sid, skey, sub = nodes._resolve_credentials("AKIDx", "sk", "1500044236")
 check("explicit creds win", (sid, skey, sub) == ("AKIDx", "sk", "1500044236"))
-os.environ["TENCENTCLOUD_SECRET_ID"] = "env-id"
-os.environ["TENCENTCLOUD_SECRET_KEY"] = "env-key"
-os.environ["VOD_SUB_APP_ID"] = "999"
-sid, skey, sub = nodes._resolve_credentials("", "", "")
-check("env fallback", (sid, skey, sub) == ("env-id", "env-key", "999"))
+
 try:
     nodes._resolve_credentials("", "", "abc123")
     check("non-numeric sub raises", False)
@@ -302,28 +295,16 @@ try:
 finally:
     nodes._append_history = orig_append
 
-# ---- 12. credentials.json 回退（v1.5.0）----
+# ---- 12. 配置文件回退（v1.5.0，v1.8.0 起仅 tencent-vod-config.json）----
 file_creds = {"secret_id": "AKIDfile", "secret_key": "sk-file", "sub_app_id": "1500044236"}
 nodes._load_config_file = lambda: file_creds
 try:
-    os.environ.pop("TENCENTCLOUD_SECRET_ID", None)
-    os.environ.pop("TENCENTCLOUD_SECRET_KEY", None)
-    os.environ.pop("VOD_SUB_APP_ID", None)
     sid, skey, sub = nodes._resolve_credentials("", "", "")
     check("creds: file fallback", (sid, skey, sub) == ("AKIDfile", "sk-file", "1500044236"))
-    # 环境变量 > 文件
-    os.environ["TENCENTCLOUD_SECRET_ID"] = "env-id"
-    os.environ["TENCENTCLOUD_SECRET_KEY"] = "env-key"
-    os.environ["VOD_SUB_APP_ID"] = "999"
-    sid, skey, sub = nodes._resolve_credentials("", "", "")
-    check("creds: env beats file", (sid, skey, sub) == ("env-id", "env-key", "999"))
-    # 节点输入 > 环境变量 > 文件
+    # 节点输入 > 文件
     sid, skey, sub = nodes._resolve_credentials("AKIDwidget", "sk-widget", "123")
-    check("creds: widget beats all", (sid, skey, sub) == ("AKIDwidget", "sk-widget", "123"))
-    # 文件损坏 → 忽略并报缺密钥（先清掉上面的环境变量）
-    os.environ.pop("TENCENTCLOUD_SECRET_ID", None)
-    os.environ.pop("TENCENTCLOUD_SECRET_KEY", None)
-    os.environ.pop("VOD_SUB_APP_ID", None)
+    check("creds: widget beats file", (sid, skey, sub) == ("AKIDwidget", "sk-widget", "123"))
+    # 文件缺失 → 报缺密钥
     nodes._load_config_file = lambda: {"secret_id": "only-id"}
     try:
         nodes._resolve_credentials("", "", "")
@@ -335,19 +316,9 @@ finally:
 
 # ---- 13. 凭据状态与保存（v1.6.0）----
 nodes._load_config_file = lambda: {"secret_id": "AKIDf", "secret_key": "sk-f", "sub_app_id": "1500044236"}
-os.environ.pop("TENCENTCLOUD_SECRET_ID", None)
-os.environ.pop("TENCENTCLOUD_SECRET_KEY", None)
-os.environ.pop("VOD_SUB_APP_ID", None)
 check("creds-status: file configured", nodes._credentials_configured() is True)
 nodes._load_config_file = lambda: {}
 check("creds-status: nothing configured", nodes._credentials_configured() is False)
-os.environ["TENCENTCLOUD_SECRET_ID"] = "env-id"
-os.environ["TENCENTCLOUD_SECRET_KEY"] = "env-key"
-os.environ["VOD_SUB_APP_ID"] = "999"
-check("creds-status: env configured", nodes._credentials_configured() is True)
-os.environ.pop("TENCENTCLOUD_SECRET_ID", None)
-os.environ.pop("TENCENTCLOUD_SECRET_KEY", None)
-os.environ.pop("VOD_SUB_APP_ID", None)
 
 import tempfile
 tmpdir = tempfile.mkdtemp()
@@ -357,7 +328,7 @@ saved = json.load(open(p))
 check("creds-save: round-trip", saved == {"secret_id": "AKIDsave", "secret_key": "sk-save",
                                           "sub_app_id": "1500044236", "prices": {}}, str(saved))
 try:
-    nodes._save_config_file("", "sk", "1500044236", os.path.join(tmpdir, "x.json"))
+    nodes._save_config_file("", "sk", "1500044236", path=os.path.join(tmpdir, "x.json"))
     check("creds-save: empty rejects", False)
 except ValueError:
     check("creds-save: empty rejects", True)
@@ -378,21 +349,11 @@ open(_nodes_cfg, "w").write(json.dumps({"secret_id": "AKIDcf", "secret_key": "sk
 cfg = nodes._load_config_file(_tmp)
 check("config: loads creds", cfg["secret_id"] == "AKIDcf" and cfg["sub_app_id"] == "1500044236")
 check("config: loads prices (str->float)", cfg["prices"] == {"768P": 0.1, "2K": 0.35}, str(cfg["prices"]))
-# 14.2 旧版 credentials.json 兼容（目录中只有旧文件时回退读取）
-_tmp_legacy = _tf.mkdtemp()
-open(os.path.join(_tmp_legacy, "credentials.json"), "w").write(
-    json.dumps({"secret_id": "AKIDlegacy", "secret_key": "sk-legacy", "sub_app_id": "1500044236"}))
-cfg2 = nodes._load_config_file(_tmp_legacy)
-check("config: legacy fallback", cfg2["secret_id"] == "AKIDlegacy", str(cfg2))
-# 14.3 单价优先级：env > 配置文件 > 0
-os.environ.pop("VOD_PRICE_768P", None)
+# 14.2 单价：配置文件 > 0（无环境变量通道）
 _orig_cfg = nodes._load_config_file
 nodes._load_config_file = lambda: {"secret_id": "x", "secret_key": "y", "sub_app_id": "1",
                                    "prices": {"768P": 0.1, "2K": 0.35}}
 check("price: from config", nodes._price_for("768P") == 0.1)
-os.environ["VOD_PRICE_768P"] = "0.9"
-check("price: env beats config", nodes._price_for("768P") == 0.9)
-os.environ.pop("VOD_PRICE_768P", None)
 check("price: unset -> 0", nodes._price_for("4K") == 0.0)
 nodes._load_config_file = _orig_cfg
 # 14.4 保存合并单价（已存在价格保留）

@@ -2,6 +2,14 @@
 
 格式：[语义化版本](https://semver.org/lang/zh-CN/)，全部提交记录见 [GitHub Releases](https://github.com/yulewang56/tencent-vod-aigc/releases)。
 
+## [1.8.0] - 2026-08-15
+
+### 移除
+- **环境变量配置通道**：`TENCENTCLOUD_SECRET_ID / TENCENTCLOUD_SECRET_KEY / VOD_SUB_APP_ID / VOD_PRICE_*`
+  全部移除——配置入口收敛为「节点输入 + tencent-vod-config.json」两处，避免配置来源混淆
+- **旧版 `credentials.json` 兼容读取**：仅保留 `tencent-vod-config.json` 一种配置文件
+- `/tencent-vod-aigc/credentials/*` 接口别名：前端统一走 `/tencent-vod-aigc/config`
+
 ## [1.7.0] - 2026-08-15
 
 ### 变更

@@ -68,19 +68,17 @@ cp tencent-vod-config.example.json tencent-vod-config.json
 
 ## 配置详解
 
-**凭据解析优先级**：节点输入（填了就用）> 环境变量 > `tencent-vod-config.json`
+**凭据解析优先级**：节点输入（填了就用）> `tencent-vod-config.json`
 
-| 配置项 | 环境变量（可选） | 配置文件 |
-|---|---|---|
-| SecretId | `TENCENTCLOUD_SECRET_ID` | `secret_id` |
-| SecretKey | `TENCENTCLOUD_SECRET_KEY` | `secret_key` |
-| SubAppId | `VOD_SUB_APP_ID` | `sub_app_id` |
-| 单价（元/秒） | `VOD_PRICE_768P` / `VOD_PRICE_1080P` / `VOD_PRICE_2K` / `VOD_PRICE_4K` | `prices` |
+| 配置项 | 配置文件字段 |
+|---|---|
+| SecretId | `secret_id` |
+| SecretKey | `secret_key` |
+| SubAppId | `sub_app_id` |
+| 单价（元/秒） | `prices.768P / 1080P / 2K / 4K` |
 
 单价用于台账**费用预估**（不足 5 秒按 5 秒计费），示例值 `0.1/0.2/0.3/0.5` 不是真实价格——
-请按《AIGC价格指南（客户）》填写；未配置时显示「¥未配置单价」。
-
-> 旧版 `credentials.json`（v1.7.0 之前）仍可被读取，但新配置请写入 `tencent-vod-config.json`。
+请按《AIGC价格指南（客户）》填写；未配置时显示「¥未配置单价」。配置入口只有两处：节点输入框与配置文件。
 
 ## 参数说明（对应文档 3.17）
 
@@ -125,7 +123,7 @@ VideoHelperSuite / 其他视频节点 → 后处理
 ## 测试
 
 ```bash
-python tests/test_nodes.py        # 65 项自包含测试，无需安装任何依赖（自带 ComfyUI/numpy/PIL stub）
+python tests/test_nodes.py        # 70 项自包含测试，无需安装任何依赖（自带 ComfyUI/numpy/PIL stub）
 ```
 
 ## 更新日志
