@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 .DS_Store
 .git/
+# 真实凭据绝不入库（模板 credentials.example.json 除外）
+credentials.json

@@ -127,15 +127,37 @@ def _call_api(secret_id: str, secret_key: str, region: str, endpoint: str, actio
     return response
 
 
+_CRED_FILE_HINT = ("custom_nodes/tencent-vod-aigc/credentials.json"
+                   "（模板见同目录 credentials.example.json）")
+
+
+def _load_credentials_file():
+    """从节点包目录读取 credentials.json（未配置/格式错误返回空 dict）。"""
+    try:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "credentials.json")
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return {k: str(data.get(k) or "").strip() for k in ("secret_id", "secret_key", "sub_app_id")}
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        print(f"[tencent-vod-aigc] credentials.json 读取失败（忽略）: {e}")
+        return {}
+
+
 def _resolve_credentials(secret_id, secret_key, sub_app_id):
-    """节点输入优先，回退到环境变量。"""
-    sid = (secret_id or "").strip() or os.environ.get("TENCENTCLOUD_SECRET_ID", "").strip()
-    skey = (secret_key or "").strip() or os.environ.get("TENCENTCLOUD_SECRET_KEY", "").strip()
-    sub = (sub_app_id or "").strip() or os.environ.get("VOD_SUB_APP_ID", "").strip()
+    """凭据解析优先级：节点输入 > 环境变量 > credentials.json。"""
+    file_creds = _load_credentials_file()
+    sid = (secret_id or "").strip() or os.environ.get("TENCENTCLOUD_SECRET_ID", "").strip() or file_creds.get("secret_id")
+    skey = (secret_key or "").strip() or os.environ.get("TENCENTCLOUD_SECRET_KEY", "").strip() or file_creds.get("secret_key")
+    sub = (sub_app_id or "").strip() or os.environ.get("VOD_SUB_APP_ID", "").strip() or file_creds.get("sub_app_id")
     if not sid or not skey:
-        raise ValueError("缺少腾讯云密钥：请在节点填写 SecretId / SecretKey，或设置环境变量 TENCENTCLOUD_SECRET_ID / TENCENTCLOUD_SECRET_KEY")
+        raise ValueError("缺少腾讯云密钥：请在节点填写 SecretId / SecretKey，设置环境变量 "
+                         "TENCENTCLOUD_SECRET_ID / TENCENTCLOUD_SECRET_KEY，或配置 "
+                         + _CRED_FILE_HINT)
     if not sub:
-        raise ValueError("缺少 SubAppId：请在节点填写，或设置环境变量 VOD_SUB_APP_ID")
+        raise ValueError("缺少 SubAppId：请在节点填写，设置环境变量 VOD_SUB_APP_ID，或配置 "
+                         + _CRED_FILE_HINT)
     if not sub.isdigit():
         raise ValueError(f"SubAppId 必须为纯数字，当前值: {sub}")
     return sid, skey, sub
@@ -365,9 +387,9 @@ def _ledger(mode: str):
 
 def _cred_inputs():
     return {
-        "secret_id": ("STRING", {"default": "", "tooltip": "腾讯云 CAM SecretId（留空则读环境变量 TENCENTCLOUD_SECRET_ID）"}),
-        "secret_key": ("STRING", {"default": "", "tooltip": "腾讯云 CAM SecretKey（留空则读环境变量 TENCENTCLOUD_SECRET_KEY）"}),
-        "sub_app_id": ("STRING", {"default": "", "tooltip": "VOD 应用 ID（留空则读环境变量 VOD_SUB_APP_ID）"}),
+        "secret_id": ("STRING", {"default": "", "tooltip": "腾讯云 CAM SecretId。留空则依次回退环境变量 TENCENTCLOUD_SECRET_ID 与节点包内 credentials.json（推荐，避免密钥进工作流 JSON）"}),
+        "secret_key": ("STRING", {"default": "", "tooltip": "腾讯云 CAM SecretKey。留空则依次回退环境变量 TENCENTCLOUD_SECRET_KEY 与 credentials.json"}),
+        "sub_app_id": ("STRING", {"default": "", "tooltip": "VOD 应用 ID。留空则依次回退环境变量 VOD_SUB_APP_ID 与 credentials.json"}),
     }
 
 

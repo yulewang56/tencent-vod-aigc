@@ -26,6 +26,18 @@ ComfyUI 自定义节点：通过**腾讯云 VOD AIGC** 聚合服务调用 **Mini
 jq -r '.[] | [.time, .status, .resolution, .duration] | @tsv' output/vod_aigc/execution_history.jsonl
 ```
 
+## 凭据一次配置（v1.5.0）
+
+节点上的 secret_id / secret_key / sub_app_id **全部留空**即可——解析优先级：
+节点输入 > 环境变量（`TENCENTCLOUD_SECRET_ID` / `TENCENTCLOUD_SECRET_KEY` / `VOD_SUB_APP_ID`）> 节点包内 `credentials.json`。
+
+```bash
+# 首次配置：复制模板并填入真实密钥（该文件已被 .gitignore 排除，永不入库/不出现在工作流 JSON）
+cp credentials.example.json credentials.json
+```
+
+密钥从此只存在这一个文件里，不随工作流 JSON 传播（报错粘贴、分享工作流都不会泄露）。
+
 ## 拒绝原因透传（v1.4.1）
 
 - FINISH 但无输出文件时，优先透传腾讯云的拒绝原因（ErrCode / ErrCodeExt / Message），如
