@@ -659,6 +659,50 @@ class TencentVODAIGCDownloadVideo:
         return (path,)
 
 
+class TencentVODAIGCViewHistory:
+    """读取执行台账（execution_history.jsonl），把历史记录以文本显示在节点输出上。"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {}}
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("history_text", "ledger_path")
+    FUNCTION = "view"
+    CATEGORY = "Tencent VOD AIGC"
+    OUTPUT_NODE = True
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("NaN")  # 每次运行都重新读取台账
+
+    def view(self):
+        from comfy import folder_paths
+        ledger = os.path.join(folder_paths.get_output_directory(), "vod_aigc", "execution_history.jsonl")
+        if not os.path.isfile(ledger):
+            return ("（台账不存在，尚无执行记录）", "")
+        lines = []
+        with open(ledger, encoding="utf-8") as f:
+            for i, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except Exception:
+                    lines.append(f"[{i}] （无法解析的记录）")
+                    continue
+                marker = "✅" if r.get("status") == "success" else "❌"
+                err = f" | 错误: {str(r.get('error', ''))[:80]}" if r.get("error") else ""
+                asset = os.path.basename(r.get("video_path") or r.get("video_url") or "")
+                lines.append(
+                    f"[{i}] {r.get('time', '')} {marker} {r.get('mode', '')} "
+                    f"{r.get('resolution', '')}/{r.get('duration', '')}s "
+                    f"| {str(r.get('prompt', ''))[:40]} | {str(r.get('task_id', ''))[-16:]} | {asset}{err}"
+                )
+        return ("\n".join(lines) if lines else "（台账为空）", ledger)
+
+
 # 三个生成节点接入执行台账：成功/失败都落盘一条 JSONL 记录
 TencentVODH3TextToVideo.generate = _ledger("t2v")(TencentVODH3TextToVideo.generate)
 TencentVODH3ImageToVideo.generate = _ledger("i2v")(TencentVODH3ImageToVideo.generate)
@@ -670,6 +714,7 @@ NODE_CLASS_MAPPINGS = {
     "TencentVODH3ReferenceToVideo": TencentVODH3ReferenceToVideo,
     "TencentVODAIGCQueryTask": TencentVODAIGCQueryTask,
     "TencentVODAIGCDownloadVideo": TencentVODAIGCDownloadVideo,
+    "TencentVODAIGCViewHistory": TencentVODAIGCViewHistory,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -678,4 +723,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "TencentVODH3ReferenceToVideo": "VOD AIGC - H3 多模态参考生视频",
     "TencentVODAIGCQueryTask": "VOD AIGC - 查询任务",
     "TencentVODAIGCDownloadVideo": "VOD AIGC - 下载视频",
+    "TencentVODAIGCViewHistory": "VOD AIGC - 查看执行台账",
 }
