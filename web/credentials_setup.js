@@ -108,6 +108,8 @@ function showSetupModal() {
       if (data.ok) {
         errorLine.style.color = "#7bd88f";
         errorLine.textContent = "✅ 已保存到 " + data.path.split("/custom_nodes/")[1] + "，现在可以直接运行节点了。";
+        saveBtn.disabled = true;
+        saveBtn.textContent = "已保存";
         laterBtn.textContent = "关闭";
       } else {
         errorLine.style.color = "#ff7b7b";
