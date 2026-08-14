@@ -2,6 +2,20 @@
 
 格式：[语义化版本](https://semver.org/lang/zh-CN/)，全部提交记录见 [GitHub Releases](https://github.com/yulewang56/tencent-vod-aigc/releases)。
 
+## [1.9.0] - 2026-08-15
+
+### 新增
+- **文生图/图生图节点**（`VOD AIGC - 文生图/图生图`，文档 3.3.2 `CreateAigcImageTask`）：
+  模型 GEM / Jimeng，文生图不传素材，图生图可接 ComfyUI IMAGE（批量，每帧一张，≤9）或参考图 URL
+- 台账 mode 自动推断 `t2i` / `i2i`（生图按张计费，秒数/费用记 0）
+
+### 改进
+- `_wait_for_task` 进度文案参数化（生图显示「生图生成中…」）；下载报错文案泛化（图片/视频通用）
+- 参考生视频 `ref_images` 工具提示补充 batch 用法说明（多张图先合成 batch 或用 `ref_image_urls`）
+
+### 修复
+- 测试文件中途残留的提前退出块（此前测试只跑前 7 节）；全量 81 项自包含测试通过
+
 ## [1.8.0] - 2026-08-15
 
 ### 移除

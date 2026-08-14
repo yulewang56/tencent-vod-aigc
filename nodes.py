@@ -313,7 +313,7 @@ def _extract_task_result(detail: dict):
 
 
 def _wait_for_task(secret_id, secret_key, region, endpoint, sub_app_id, task_id,
-                   poll_interval, timeout, on_progress=None) -> dict:
+                   poll_interval, timeout, on_progress=None, task_label="H3 生成中") -> dict:
     """轮询 DescribeTaskDetail 直到任务完成，返回 {"status", "urls", "detail"}。"""
     deadline = time.time() + timeout
     started = time.time()
@@ -336,7 +336,7 @@ def _wait_for_task(secret_id, secret_key, region, endpoint, sub_app_id, task_id,
             raise TaskError(task_id, f"任务超时（{timeout}s 未完成）。TaskId: {task_id}，可用「VOD AIGC - 查询任务」节点手动查询")
         elapsed = int(time.time() - started)
         if on_progress:
-            on_progress(f"H3 生成中… {elapsed}s | TaskId: {task_id[-16:]}")
+            on_progress(f"{task_label}… {elapsed}s | TaskId: {task_id[-16:]}")
         time.sleep(max(1, int(poll_interval)))
 
 
@@ -368,9 +368,9 @@ def _download_video(url: str, task_id: str, on_progress=None) -> str:
                     pct = f"{downloaded / total * 100:.0f}%" if total else f"{downloaded // (1024 * 1024)}MB"
                     on_progress(f"下载中… {pct}")
     except urllib.error.HTTPError as e:
-        raise RuntimeError(f"视频下载失败 HTTP {e.code}。可手动下载: {url}")
+        raise RuntimeError(f"文件下载失败 HTTP {e.code}。可手动下载: {url}")
     except (urllib.error.URLError, TimeoutError, OSError) as e:
-        raise RuntimeError(f"视频下载失败（{e}）。可手动下载: {url}")
+        raise RuntimeError(f"文件下载失败（{e}）。可手动下载: {url}")
     return path
 
 
@@ -418,6 +418,11 @@ def _view_url_for(path: str) -> str:
 
 def _base_record(mode: str, prompt: str, kwargs: dict, task_id="", url="", path="", error=""):
     """构造台账记录：含计费要素（时长/分辨率/音频/存储方式），便于成本审计。"""
+    if mode in ("t2i", "i2i"):  # 生图按张计费，秒数/费用留 0
+        seconds_billed, estimated_cost = 0, 0.0
+    else:
+        seconds_billed, estimated_cost = _estimate_cost(kwargs.get("resolution") or "",
+                                                        kwargs.get("duration") or 0)
     return {
         "mode": mode,
         "task_id": task_id,
@@ -432,23 +437,28 @@ def _base_record(mode: str, prompt: str, kwargs: dict, task_id="", url="", path=
         "video_url": url,
         "video_path": path,
         "view_url": _view_url_for(path) if path else "",
-        "seconds_billed": _estimate_cost(kwargs.get("resolution") or "", kwargs.get("duration") or 0)[0],
-        "estimated_cost": _estimate_cost(kwargs.get("resolution") or "", kwargs.get("duration") or 0)[1],
+        "seconds_billed": seconds_billed,
+        "estimated_cost": estimated_cost,
         "error": (error or "")[:500],
     }
 
 
-def _ledger(mode: str):
-    """生成节点装饰器：成功/失败都写执行台账；失败原样抛出。"""
+def _ledger(mode):
+    """生成节点装饰器：成功/失败都写执行台账；失败原样抛出。
+
+    mode 为 None 时按输入自动推断：有参考图/参考 URL 记 i2i，否则 t2i。
+    """
     def deco(fn):
         @functools.wraps(fn)
         def wrapper(self, prompt, **kwargs):
+            m = mode or ("i2i" if (kwargs.get("ref_image") is not None
+                                   or (kwargs.get("ref_image_urls") or "").strip()) else "t2i")
             try:
                 task_id, url, path = fn(self, prompt, **kwargs)
-                _append_history(_base_record(mode, prompt, kwargs, task_id, url, path))
+                _append_history(_base_record(m, prompt, kwargs, task_id, url, path))
                 return (task_id, url, path)
             except Exception as e:
-                _append_history(_base_record(mode, prompt, kwargs,
+                _append_history(_base_record(m, prompt, kwargs,
                                              task_id=getattr(e, "task_id", ""), error=str(e)))
                 raise
         return wrapper
@@ -508,6 +518,25 @@ def _build_payload(sub_app_id, prompt, enhance_prompt, oc_values, file_infos=Non
         payload["FileInfos"] = file_infos
     if input_region:
         payload["InputRegion"] = input_region
+    return payload
+
+
+def _build_image_payload(sub_app_id, prompt, model, oc_values, file_infos=None):
+    """构造 CreateAigcImageTask 请求体（文档 3.3.2：GEM / Jimeng）。"""
+    name, _, version = (model or "Jimeng 4.0").partition(" ")
+    payload = {
+        "SubAppId": int(sub_app_id),
+        "ModelName": name,
+        "ModelVersion": version,
+        "Prompt": prompt,
+        "OutputConfig": {
+            "StorageMode": oc_values["storage_mode"],
+            "Resolution": oc_values["resolution"],
+            "AspectRatio": oc_values["aspect_ratio"],
+        },
+    }
+    if file_infos:
+        payload["FileInfos"] = file_infos
     return payload
 
 
@@ -632,7 +661,7 @@ class TencentVODH3ReferenceToVideo:
         required = dict(_cred_inputs())
         required["prompt"] = ("STRING", {"multiline": True, "default": "", "tooltip": "提示词；多图时可用「图1…图2…」描述"})
         optional = _output_config_inputs()
-        optional["ref_images"] = ("IMAGE", {"tooltip": "参考图（每帧一张，最多 9 张）"})
+        optional["ref_images"] = ("IMAGE", {"tooltip": "参考图，支持批量（batch）：多张图请先合成 batch（如 Load Images / ImageBatch 节点），每帧一张，最多 9 张；也可用 ref_image_urls 传多个 URL"})
         optional["ref_image_urls"] = ("STRING", {"multiline": True, "default": "", "tooltip": "参考图 URL，每行一个，最多 9 个"})
         optional["ref_video_paths"] = ("STRING", {"multiline": True, "default": "", "tooltip": "本地参考视频路径，每行一个（2-15 秒/段，最多 3 段，共 ≤15 秒）"})
         optional["ref_video_urls"] = ("STRING", {"multiline": True, "default": "", "tooltip": "参考视频 URL，每行一个"})
@@ -723,6 +752,82 @@ class TencentVODH3ReferenceToVideo:
                                 on_progress=lambda t: _set_status(self, t))
         url = result["urls"][0]
         _set_status(self, "下载视频…")
+        path = _download_video(url, task_id, on_progress=lambda t: _set_status(self, t))
+        _set_status(self, "完成")
+        return (task_id, url, path)
+
+
+class TencentVODAIGCImageTask:
+    """文生图 / 图生图：CreateAigcImageTask（文档 3.3.2，模型 GEM / Jimeng）。
+
+    文生图不传 FileInfos；图生图可接 ComfyUI IMAGE（批量，每帧一张）或参考图 URL。
+    输出下载到 output/vod_aigc/，台账 mode 记 t2i / i2i（生图按张计费，费用留 0）。
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        required = dict(_cred_inputs())
+        required["prompt"] = ("STRING", {"multiline": True, "default": "",
+                                         "tooltip": "提示词；图生图时描述参考图中的主体"})
+        optional = {
+            "model": (["Jimeng 4.0", "GEM 3.0"], {"default": "Jimeng 4.0",
+                                                   "tooltip": "生图模型（文档 3.3.2 示例）"}),
+            "ref_image": ("IMAGE", {"tooltip": "参考图（图生图）。多张请先合成 batch，每帧一张，最多 9 张；或用 ref_image_urls"}),
+            "ref_image_urls": ("STRING", {"multiline": True, "default": "",
+                                          "tooltip": "参考图 URL（图生图），每行一个，最多 9 个"}),
+            "resolution": (["768P", "1080P"], {"default": "1080P"}),
+            "aspect_ratio": (ASPECT_RATIOS, {"default": "16:9"}),
+            "storage_mode": (STORAGE_MODES, {"default": "Temporary"}),
+            "region": ("STRING", {"default": DEFAULT_REGION}),
+            "endpoint": ("STRING", {"default": ""}),
+            "poll_interval": ("INT", {"default": 10, "min": 3, "max": 120, "step": 1}),
+            "timeout": ("INT", {"default": 600, "min": 60, "max": 7200, "step": 60}),
+        }
+        return {"required": required, "optional": optional}
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("task_id", "image_url", "image_path")
+    FUNCTION = "generate"
+    CATEGORY = "Tencent VOD AIGC"
+    OUTPUT_NODE = True
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("NaN")  # 每次都提交新任务，不缓存
+
+    @_ledger(None)  # mode 按是否有参考图自动推断 t2i / i2i
+    def generate(self, prompt, **kwargs):
+        if not prompt.strip():
+            raise ValueError("Prompt 不能为空")
+
+        file_infos = []
+        ref_image = kwargs.get("ref_image")
+        if ref_image is not None:
+            n = ref_image.shape[0]
+            if n > 9:
+                raise ValueError(f"参考图最多 9 张，当前 {n} 张")
+            for i in range(n):
+                data = _image_tensor_to_base64(ref_image, i)
+                file_infos.append({"Type": "Base64", "Category": "Image", "Base64": data})
+        for url in _parse_multiline(kwargs.get("ref_image_urls")):
+            file_infos.append({"Type": "Url", "Category": "Image", "Url": url})
+
+        secret_id, secret_key, sub_app_id = _resolve_credentials(
+            kwargs.get("secret_id"), kwargs.get("secret_key"), kwargs.get("sub_app_id"))
+        region = kwargs.get("region") or ""
+        endpoint = kwargs.get("endpoint") or ""
+        payload = _build_image_payload(sub_app_id, prompt, kwargs.get("model"), kwargs,
+                                       file_infos or None)
+        _set_status(self, "提交生图任务…")
+        response = _call_api(secret_id, secret_key, region, endpoint, "CreateAigcImageTask", payload)
+        task_id = response.get("TaskId")
+        if not task_id:
+            raise RuntimeError(f"未返回 TaskId（原始响应: {json.dumps(response, ensure_ascii=False)[:400]}）")
+        result = _wait_for_task(secret_id, secret_key, region, endpoint, sub_app_id, task_id,
+                                kwargs.get("poll_interval", 10), kwargs.get("timeout", 600),
+                                on_progress=lambda t: _set_status(self, t), task_label="生图生成中")
+        url = result["urls"][0]
+        _set_status(self, "下载图片…")
         path = _download_video(url, task_id, on_progress=lambda t: _set_status(self, t))
         _set_status(self, "完成")
         return (task_id, url, path)
@@ -863,6 +968,7 @@ NODE_CLASS_MAPPINGS = {
     "TencentVODH3TextToVideo": TencentVODH3TextToVideo,
     "TencentVODH3ImageToVideo": TencentVODH3ImageToVideo,
     "TencentVODH3ReferenceToVideo": TencentVODH3ReferenceToVideo,
+    "TencentVODAIGCImageTask": TencentVODAIGCImageTask,
     "TencentVODAIGCQueryTask": TencentVODAIGCQueryTask,
     "TencentVODAIGCDownloadVideo": TencentVODAIGCDownloadVideo,
     "TencentVODAIGCViewHistory": TencentVODAIGCViewHistory,
@@ -872,6 +978,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "TencentVODH3TextToVideo": "VOD AIGC - H3 文生视频",
     "TencentVODH3ImageToVideo": "VOD AIGC - H3 图生视频（首/尾帧）",
     "TencentVODH3ReferenceToVideo": "VOD AIGC - H3 多模态参考生视频",
+    "TencentVODAIGCImageTask": "VOD AIGC - 文生图/图生图",
     "TencentVODAIGCQueryTask": "VOD AIGC - 查询任务",
     "TencentVODAIGCDownloadVideo": "VOD AIGC - 下载视频",
     "TencentVODAIGCViewHistory": "VOD AIGC - 查看执行台账",

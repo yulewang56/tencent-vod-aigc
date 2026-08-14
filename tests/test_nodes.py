@@ -30,9 +30,10 @@ def check(name, cond, detail=""):
 
 # ---- 1. node registry ----
 expected = ["TencentVODH3TextToVideo", "TencentVODH3ImageToVideo",
-            "TencentVODH3ReferenceToVideo", "TencentVODAIGCQueryTask", "TencentVODAIGCDownloadVideo",
+            "TencentVODH3ReferenceToVideo", "TencentVODAIGCImageTask",
+            "TencentVODAIGCQueryTask", "TencentVODAIGCDownloadVideo",
             "TencentVODAIGCViewHistory"]
-check("5 nodes registered", set(expected) == set(nodes.NODE_CLASS_MAPPINGS),
+check("all nodes registered", set(expected) == set(nodes.NODE_CLASS_MAPPINGS),
       f"got {sorted(nodes.NODE_CLASS_MAPPINGS)}")
 check("display names cover all", set(expected) == set(nodes.NODE_DISPLAY_NAME_MAPPINGS))
 
@@ -130,12 +131,6 @@ except ValueError:
 
 # ---- 7. multiline parsing ----
 check("multiline parse", nodes._parse_multiline("a\n\nb\n") == ["a", "b"])
-
-print()
-if failures:
-    print(f"RESULT: {len(failures)} FAILED: {failures}")
-    sys.exit(1)
-print("RESULT: ALL PASS")
 
 # ---- 8. canonical headers 规范（x-tc-action 小写）----
 hdrs = {"Host": "vod.tencentcloudapi.com", "Content-Type": "application/json; charset=utf-8",
@@ -374,3 +369,72 @@ p3 = nodes._save_config_file("AKIDa", "sk", "1500044236", prices={},
                              path=os.path.join(_tmp, "tencent-vod-config.json"))
 merged2 = json.load(open(p3))
 check("config-save: empty prices keeps existing", merged2["prices"] == merged["prices"])
+
+# ---- 15. 文生图/图生图节点（v1.9.0，文档 3.3.2）----
+# 15.1 注册与 payload
+check("t2i: registered", "TencentVODAIGCImageTask" in nodes.NODE_CLASS_MAPPINGS)
+img_payload = nodes._build_image_payload("1500044236", "一只猫", "Jimeng 4.0",
+                                         {"storage_mode": "Temporary", "resolution": "1080P", "aspect_ratio": "16:9"})
+check("t2i: payload t2i (no FileInfos)", img_payload == {
+    "SubAppId": 1500044236, "ModelName": "Jimeng", "ModelVersion": "4.0", "Prompt": "一只猫",
+    "OutputConfig": {"StorageMode": "Temporary", "Resolution": "1080P", "AspectRatio": "16:9"}}, str(img_payload))
+img_payload2 = nodes._build_image_payload("1500044236", "p", "GEM 3.0",
+                                          {"storage_mode": "Temporary", "resolution": "768P", "aspect_ratio": "1:1"},
+                                          file_infos=[{"Type": "Url", "Category": "Image", "Url": "https://x/a.png"}])
+check("t2i: payload i2i (with FileInfos)", img_payload2["FileInfos"][0]["Url"] == "https://x/a.png"
+      and img_payload2["ModelName"] == "GEM", str(img_payload2))
+
+# 15.2 批量 IMAGE → 每帧一张 FileInfos；全流程 mock
+class FakeTensor:
+    shape = (3, 1, 1, 3)
+    def __getitem__(self, i):
+        return self
+captured2 = {}
+orig_b64 = nodes._image_tensor_to_base64
+orig_dl = nodes._download_video
+nodes._image_tensor_to_base64 = lambda t, i: f"b64-{i}"
+nodes._download_video = lambda url, task_id, on_progress=None: "/tmp/fake.png"
+def fake_img_call(secret_id, secret_key, region, endpoint, action, payload):
+    if action == "CreateAigcImageTask":
+        captured2["payload"] = payload
+        return {"TaskId": "1500044236-AigcImageTask-abc123t"}
+    return {"TaskType": "AigcImageTask", "Status": "FINISH",
+            "AigcImageTask": {"Status": "FINISH", "Output": {"FileInfos": [
+                {"FileUrl": "https://cdn/aigcImageGenFile.png"}]}}}
+orig_call2 = nodes._call_api
+nodes._call_api = fake_img_call
+try:
+    node_obj = nodes.TencentVODAIGCImageTask()
+    tid, url, path = node_obj.generate("一只猫在窗边", secret_id="AKIDx", secret_key="sk",
+                                       sub_app_id="1500044236", ref_image=FakeTensor(),
+                                       model="Jimeng 4.0", storage_mode="Temporary",
+                                       resolution="1080P", aspect_ratio="16:9",
+                                       poll_interval=3, timeout=60)
+    check("t2i: flow returns", tid == "1500044236-AigcImageTask-abc123t" and path == "/tmp/fake.png")
+    fis = captured2["payload"]["FileInfos"]
+    check("t2i: batch 3 frames -> 3 FileInfos", len(fis) == 3 and all(f["Type"] == "Base64" for f in fis), str(fis))
+    check("t2i: no duration in OutputConfig", "Duration" not in captured2["payload"]["OutputConfig"])
+finally:
+    nodes._call_api = orig_call2
+    nodes._image_tensor_to_base64 = orig_b64
+    nodes._download_video = orig_dl
+
+# 15.3 台账：生图费用归零
+rec_img = nodes._base_record("t2i", "猫", {"resolution": "1080P"})
+check("t2i: ledger cost zero", rec_img["seconds_billed"] == 0 and rec_img["estimated_cost"] == 0.0, str(rec_img))
+rec_img2 = nodes._base_record("i2i", "猫", {"resolution": "1080P"})
+check("t2i: ledger i2i cost zero", rec_img2["estimated_cost"] == 0.0)
+
+# 15.4 AigcImageTask 响应解析（与视频同构）
+img_detail = {"TaskType": "AigcImageTask", "Status": "FINISH",
+              "AigcImageTask": {"Status": "FINISH", "Output": {"FileInfos": [
+                  {"FileUrl": "https://cdn/aigcImageGenFile.png"}]}}}
+status, err, err_ext, msg, urls = nodes._extract_task_result(img_detail)
+check("t2i: extract image urls", status == "FINISH" and urls == ["https://cdn/aigcImageGenFile.png"], str(urls))
+
+# ---- 汇总 ----
+print()
+if failures:
+    print(f"RESULT: {len(failures)} FAILED: {failures}")
+    sys.exit(1)
+print("RESULT: ALL PASS")
