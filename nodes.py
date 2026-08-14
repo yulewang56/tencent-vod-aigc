@@ -283,6 +283,33 @@ def _append_history(record: dict):
         print(f"[tencent-vod-aigc] 执行台账写入失败: {e}")
 
 
+# 单价（元/秒），按《AIGC价格指南（客户）》配置；可用环境变量覆盖，如 VOD_PRICE_2K=0.5
+_PRICES_PER_SECOND = {
+    "768P": float(os.environ.get("VOD_PRICE_768P", "0")),
+    "1080P": float(os.environ.get("VOD_PRICE_1080P", "0")),
+    "2K": float(os.environ.get("VOD_PRICE_2K", "0")),
+    "4K": float(os.environ.get("VOD_PRICE_4K", "0")),
+}
+_MIN_BILLED_SECONDS = 5  # 每次任务不足 5 秒按 5 秒计费
+
+
+def _estimate_cost(resolution: str, duration: int) -> tuple:
+    """按计费规则估算费用：秒数 = max(时长, 5)，费用 = 秒数 × 单价（元）。"""
+    seconds_billed = max(int(duration or 0), _MIN_BILLED_SECONDS)
+    rate = _PRICES_PER_SECOND.get(resolution or "", 0.0)
+    return seconds_billed, round(seconds_billed * rate, 4)
+
+
+def _view_url_for(path: str) -> str:
+    """把输出目录下的文件转成 ComfyUI /view 链接（浏览器可直接播放）。"""
+    try:
+        rel = os.path.relpath(path, folder_paths.get_output_directory())
+        sub, name = os.path.split(rel)
+        return f"/view?filename={urllib.parse.quote(name)}&subfolder={urllib.parse.quote(sub)}&type=output"
+    except Exception:
+        return ""
+
+
 def _base_record(mode: str, prompt: str, kwargs: dict, task_id="", url="", path="", error=""):
     """构造台账记录：含计费要素（时长/分辨率/音频/存储方式），便于成本审计。"""
     return {
@@ -298,6 +325,9 @@ def _base_record(mode: str, prompt: str, kwargs: dict, task_id="", url="", path=
         "enhance_prompt": kwargs.get("enhance_prompt") or "",
         "video_url": url,
         "video_path": path,
+        "view_url": _view_url_for(path) if path else "",
+        "seconds_billed": _estimate_cost(kwargs.get("resolution") or "", kwargs.get("duration") or 0)[0],
+        "estimated_cost": _estimate_cost(kwargs.get("resolution") or "", kwargs.get("duration") or 0)[1],
         "error": (error or "")[:500],
     }
 
@@ -697,10 +727,16 @@ class TencentVODAIGCViewHistory:
                 marker = "✅" if r.get("status") == "success" else "❌"
                 err = f" | 错误: {str(r.get('error', ''))[:80]}" if r.get("error") else ""
                 asset = os.path.basename(r.get("video_path") or r.get("video_url") or "")
+                cost = r.get("estimated_cost") or 0
+                billed = r.get("seconds_billed") or 0
+                cost_txt = f"≈¥{cost:.2f}/{billed}s" if cost > 0 else "¥未配置单价"
+                url_or_asset = r.get("video_url") or asset
+                view = r.get("view_url") or ""
                 lines.append(
                     f"[{i}] {r.get('time', '')} {marker} {r.get('mode', '')} "
-                    f"{r.get('resolution', '')}/{r.get('duration', '')}s "
-                    f"| {str(r.get('prompt', ''))[:40]} | {str(r.get('task_id', ''))[-16:]} | {asset}{err}"
+                    f"{r.get('resolution', '')}/{r.get('duration', '')}s {cost_txt}"
+                    f" | {str(r.get('prompt', ''))[:40]} | {str(r.get('task_id', ''))[-16:]}"
+                    f" | {url_or_asset}{(' | ' + view) if view else ''}{err}"
                 )
         text = "\n".join(lines) if lines else "（台账为空）"
         # ui 协议：让文本显示在节点输出区与历史面板；result 提供实际输出值

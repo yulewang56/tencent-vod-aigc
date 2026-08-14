@@ -26,6 +26,18 @@ ComfyUI 自定义节点：通过**腾讯云 VOD AIGC** 聚合服务调用 **Mini
 jq -r '.[] | [.time, .status, .resolution, .duration] | @tsv' output/vod_aigc/execution_history.jsonl
 ```
 
+## 计费与链接（v1.4.0）
+
+- **费用预估**：每条记录新增 `seconds_billed`（不足 5 秒按 5 秒）与 `estimated_cost`（元），
+  单价按《AIGC价格指南》配置——环境变量 `VOD_PRICE_768P / VOD_PRICE_1080P / VOD_PRICE_2K / VOD_PRICE_4K`
+  （元/秒），未配置时显示「¥未配置单价」：
+  ```bash
+  export VOD_PRICE_768P=0.1   # 示例值，按你的价格指南填写
+  export VOD_PRICE_2K=0.3
+  ```
+- **可点击链接**：浮窗中「视频URL」直接打开在线视频；「本地文件」通过 ComfyUI `/view`
+  接口在浏览器播放（不依赖本机播放器）。
+
 ## 台账显示（v1.3.0）
 
 「VOD AIGC - 查看执行台账」节点执行完成后，台账文本会以**右下角浮窗**显示
