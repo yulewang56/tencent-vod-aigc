@@ -179,8 +179,16 @@ def _parse_multiline(text):
     return [line.strip() for line in text.splitlines() if line.strip()]
 
 
+class TaskError(RuntimeError):
+    """任务级错误：携带 task_id，供台账记录与后续排查。"""
+
+    def __init__(self, task_id, message):
+        super().__init__(message)
+        self.task_id = task_id
+
+
 def _extract_task_result(detail: dict):
-    """从 DescribeTaskDetail 响应中提取 AIGC 任务状态与输出文件 URL（只取 Output 子树）。"""
+    """从 DescribeTaskDetail 响应中提取 AIGC 任务状态、错误信息与输出文件 URL（只取 Output 子树）。"""
     task_dict = None
     for key, value in detail.items():
         if isinstance(value, dict) and re.search(r"(Aigc|SceneAigc)\w*Task$", key):
@@ -191,6 +199,7 @@ def _extract_task_result(detail: dict):
 
     status = task_dict.get("Status") or detail.get("Status")
     err_code = task_dict.get("ErrCode")
+    err_code_ext = task_dict.get("ErrCodeExt")
     message = task_dict.get("Message")
 
     urls = []
@@ -206,7 +215,7 @@ def _extract_task_result(detail: dict):
                 _walk(item)
 
     _walk(task_dict.get("Output") or {})
-    return (status or "").upper(), err_code, message, urls
+    return (status or "").upper(), err_code, err_code_ext, message, urls
 
 
 def _wait_for_task(secret_id, secret_key, region, endpoint, sub_app_id, task_id,
@@ -219,15 +228,18 @@ def _wait_for_task(secret_id, secret_key, region, endpoint, sub_app_id, task_id,
                              {"SubAppId": int(sub_app_id), "TaskId": task_id})
         # 真实响应把任务详情平铺在 Response 顶层（部分文档描述为嵌套在 TaskDetail，两者都兼容）
         detail = response.get("TaskDetail") or response
-        status, err_code, message, urls = _extract_task_result(detail)
+        status, err_code, err_code_ext, message, urls = _extract_task_result(detail)
         if status in ("SUCCESS", "FINISH"):
             if not urls:
-                raise RuntimeError(f"任务成功但未找到输出文件 URL（原始响应: {json.dumps(detail, ensure_ascii=False)[:400]}）")
+                if err_code or err_code_ext or message:
+                    hint = "（提示词或素材触发内容安全审核，请修改后重试）" if err_code_ext and "Violation" in err_code_ext else ""
+                    raise TaskError(task_id, f"H3 任务被拒绝（ErrCode={err_code} ErrCodeExt={err_code_ext or '-'} Message={message or '-'}）TaskId: {task_id} {hint}".rstrip())
+                raise TaskError(task_id, f"任务成功但未找到输出文件 URL（原始响应: {json.dumps(detail, ensure_ascii=False)[:400]}）")
             return {"status": status, "urls": urls, "detail": detail}
         if status in ("FAIL", "FAILED", "ERROR"):
-            raise RuntimeError(f"H3 任务失败 (ErrCode={err_code}): {message or '未知错误'}（TaskId: {task_id}）")
+            raise TaskError(task_id, f"H3 任务失败 (ErrCode={err_code}): {message or '未知错误'}（TaskId: {task_id}）")
         if time.time() > deadline:
-            raise RuntimeError(f"任务超时（{timeout}s 未完成）。TaskId: {task_id}，可用「VOD AIGC - 查询任务」节点手动查询")
+            raise TaskError(task_id, f"任务超时（{timeout}s 未完成）。TaskId: {task_id}，可用「VOD AIGC - 查询任务」节点手动查询")
         elapsed = int(time.time() - started)
         if on_progress:
             on_progress(f"H3 生成中… {elapsed}s | TaskId: {task_id[-16:]}")
@@ -342,7 +354,8 @@ def _ledger(mode: str):
                 _append_history(_base_record(mode, prompt, kwargs, task_id, url, path))
                 return (task_id, url, path)
             except Exception as e:
-                _append_history(_base_record(mode, prompt, kwargs, error=str(e)))
+                _append_history(_base_record(mode, prompt, kwargs,
+                                             task_id=getattr(e, "task_id", ""), error=str(e)))
                 raise
         return wrapper
     return deco
@@ -649,7 +662,7 @@ class TencentVODAIGCQueryTask:
                              {"SubAppId": int(sub_app_id), "TaskId": task_id.strip()})
         # 真实响应把任务详情平铺在 Response 顶层（部分文档描述为嵌套在 TaskDetail，两者都兼容）
         detail = response.get("TaskDetail") or response
-        status, _, _, urls = _extract_task_result(detail)
+        status, _, _, _, urls = _extract_task_result(detail)
         return (status or "UNKNOWN", "\n".join(urls), json.dumps(detail, ensure_ascii=False, indent=2))
 
 

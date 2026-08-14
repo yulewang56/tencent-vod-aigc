@@ -26,6 +26,14 @@ ComfyUI 自定义节点：通过**腾讯云 VOD AIGC** 聚合服务调用 **Mini
 jq -r '.[] | [.time, .status, .resolution, .duration] | @tsv' output/vod_aigc/execution_history.jsonl
 ```
 
+## 拒绝原因透传（v1.4.1）
+
+- FINISH 但无输出文件时，优先透传腾讯云的拒绝原因（ErrCode / ErrCodeExt / Message），如
+  `H3 任务被拒绝（ErrCode=70000 ErrCodeExt=InvalidParameter.ViolationContent Message=Input Prompt violates policy）`，
+  并附内容安全提示——不再误报"任务成功但未找到输出文件 URL"
+- 所有任务级错误（拒绝/失败/超时）均携带 TaskId
+- 台账失败记录自动回填 task_id
+
 ## 计费与链接（v1.4.0）
 
 - **费用预估**：每条记录新增 `seconds_billed`（不足 5 秒按 5 秒）与 `estimated_cost`（元），
