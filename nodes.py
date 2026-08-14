@@ -22,6 +22,12 @@ import urllib.request
 import numpy as np
 from PIL import Image
 
+# folder_paths 在不同 ComfyUI 版本位置不同：经典版是仓库根目录的顶层模块，新版在 comfy 包内
+try:
+    from comfy import folder_paths
+except ImportError:
+    import folder_paths
+
 # ---------------------------------------------------------------- 常量
 
 SERVICE = "vod"
@@ -234,7 +240,6 @@ def _download_video(url: str, task_id: str, on_progress=None) -> str:
     流式下载 + 60s 超时 + 进度回调；失败时抛出包含可手动下载 URL 的错误，
     避免阻塞线程导致整个 ComfyUI 无法中断。
     """
-    from comfy import folder_paths
 
     out_dir = os.path.join(folder_paths.get_output_directory(), "vod_aigc")
     os.makedirs(out_dir, exist_ok=True)
@@ -268,7 +273,6 @@ def _download_video(url: str, task_id: str, on_progress=None) -> str:
 def _append_history(record: dict):
     """把一条执行记录追加到 output/vod_aigc/execution_history.jsonl（成功/失败都记）。"""
     try:
-        from comfy import folder_paths
         out_dir = os.path.join(folder_paths.get_output_directory(), "vod_aigc")
         os.makedirs(out_dir, exist_ok=True)
         path = os.path.join(out_dir, "execution_history.jsonl")
@@ -648,7 +652,6 @@ class TencentVODAIGCDownloadVideo:
             ext = os.path.splitext(original)[1] or ".mp4"
             if not name_hint.lower().endswith((".mp4", ".mov", ".webm")):
                 name_hint += ext
-        from comfy import folder_paths
         out_dir = os.path.join(folder_paths.get_output_directory(), "vod_aigc")
         os.makedirs(out_dir, exist_ok=True)
         name = name_hint or os.path.basename(urllib.parse.urlparse(url.strip()).path) or "aigcVideoGenFile.mp4"
@@ -677,7 +680,6 @@ class TencentVODAIGCViewHistory:
         return float("NaN")  # 每次运行都重新读取台账
 
     def view(self):
-        from comfy import folder_paths
         ledger = os.path.join(folder_paths.get_output_directory(), "vod_aigc", "execution_history.jsonl")
         if not os.path.isfile(ledger):
             return ("（台账不存在，尚无执行记录）", "")
