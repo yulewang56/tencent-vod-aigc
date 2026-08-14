@@ -435,10 +435,14 @@ def _ledger(mode: str):
 # ---------------------------------------------------------------- 输入模板
 
 def _cred_inputs():
+    """凭据输入模板：display_name 为前端显示名（可选标记），键名保持 secret_id 不变。"""
     return {
-        "secret_id": ("STRING", {"default": "", "tooltip": "（选填）腾讯云 CAM SecretId。留空则自动读取环境变量 TENCENTCLOUD_SECRET_ID 或节点包内 credentials.json，建议留空以免密钥写入工作流 JSON"}),
-        "secret_key": ("STRING", {"default": "", "tooltip": "（选填）腾讯云 CAM SecretKey。留空则自动读取环境变量 TENCENTCLOUD_SECRET_KEY 或 credentials.json"}),
-        "sub_app_id": ("STRING", {"default": "", "tooltip": "（选填）VOD 应用 ID。留空则自动读取环境变量 VOD_SUB_APP_ID 或 credentials.json"}),
+        "secret_id": ("STRING", {"default": "", "display_name": "secret_id (optional)",
+                                 "tooltip": "（选填）腾讯云 CAM SecretId。留空则自动读取环境变量 TENCENTCLOUD_SECRET_ID 或节点包内 credentials.json，建议留空以免密钥写入工作流 JSON"}),
+        "secret_key": ("STRING", {"default": "", "display_name": "secret_key (optional)",
+                                  "tooltip": "（选填）腾讯云 CAM SecretKey。留空则自动读取环境变量 TENCENTCLOUD_SECRET_KEY 或 credentials.json"}),
+        "sub_app_id": ("STRING", {"default": "", "display_name": "sub_app_id (optional)",
+                                  "tooltip": "（选填）VOD 应用 ID。留空则自动读取环境变量 VOD_SUB_APP_ID 或 credentials.json"}),
     }
 
 

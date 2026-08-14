@@ -26,6 +26,11 @@ ComfyUI 自定义节点：通过**腾讯云 VOD AIGC** 聚合服务调用 **Mini
 jq -r '.[] | [.time, .status, .resolution, .duration] | @tsv' output/vod_aigc/execution_history.jsonl
 ```
 
+## 凭据字段标注可选（v1.6.1）
+
+SecretId / SecretKey / SubAppId 输入框显示名改为 `secret_id (optional)` 等（键名不变，代码兼容零改动；
+前端通过 `display_name` 机制渲染显示名）。
+
 ## 首次使用弹窗 + 测试入库（v1.6.0）
 
 - **首次使用弹窗**：在画布上添加任一生成/查询节点且凭据未配置时，右下弹出设置框，填写后一键写入
