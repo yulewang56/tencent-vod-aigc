@@ -702,7 +702,9 @@ class TencentVODAIGCViewHistory:
                     f"{r.get('resolution', '')}/{r.get('duration', '')}s "
                     f"| {str(r.get('prompt', ''))[:40]} | {str(r.get('task_id', ''))[-16:]} | {asset}{err}"
                 )
-        return ("\n".join(lines) if lines else "（台账为空）", ledger)
+        text = "\n".join(lines) if lines else "（台账为空）"
+        # ui 协议：让文本显示在节点输出区与历史面板；result 提供实际输出值
+        return {"ui": {"text": [text]}, "result": (text, ledger)}
 
 
 # 三个生成节点接入执行台账：成功/失败都落盘一条 JSONL 记录
