@@ -4,10 +4,12 @@ Registers VOD AIGC nodes under the "Tencent VOD AIGC" category.
 Pure-stdlib API client (TC3-HMAC-SHA256 signing) — no extra pip packages needed.
 """
 
+WEB_DIRECTORY = "web"
+
 try:
     from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
 except Exception as _err:
-    print("[comfyui-tencent-vod-aigc] 节点包加载失败，请检查 custom_nodes/comfyui-tencent-vod-aigc 目录内容")
+    print("[comfyui-tencent-vod-aigc] 节点包加载失败，请检查 custom_nodes/tencent-vod-aigc 目录内容")
     print(f"[comfyui-tencent-vod-aigc] 错误详情: {_err}")
     raise
 
