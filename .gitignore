@@ -2,5 +2,7 @@ __pycache__/
 *.pyc
 .DS_Store
 .git/
-# 真实凭据绝不入库（模板 credentials.example.json 除外）
+# 真实配置（含凭据）绝不入库；模板 tencent-vod-config.example.json 除外
+tencent-vod-config.json
+# 旧版凭据文件（v1.7.0 前的名称，仅兼容读取）
 credentials.json

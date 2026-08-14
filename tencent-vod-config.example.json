@@ -1,0 +1,11 @@
+{
+  "secret_id": "AKIDxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "secret_key": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "sub_app_id": "1500000000",
+  "prices": {
+    "768P": 0.1,
+    "1080P": 0.2,
+    "2K": 0.3,
+    "4K": 0.5
+  }
+}

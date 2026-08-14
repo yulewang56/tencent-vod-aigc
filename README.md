@@ -14,72 +14,17 @@ ComfyUI 自定义节点：通过**腾讯云 VOD AIGC** 聚合服务调用 **Mini
 | `VOD AIGC - H3 多模态参考生视频` | ≤9 图 + ≤3 视频 + ≤3 音频（总数 ≤12），支持本地文件或 URL |
 | `VOD AIGC - 查询任务` | 按 TaskId 查状态（超时/失败排查用） |
 | `VOD AIGC - 下载视频` | 按 URL 重新下载视频 |
+| `VOD AIGC - 查看执行台账` | 显示 `output/vod_aigc/execution_history.jsonl` 中的历史记录（右下角浮窗） |
 
-## 执行台账（v1.1）
-
-三个生成节点每次运行（成功或失败）都会追加一条 JSON 记录到
-`output/vod_aigc/execution_history.jsonl`，含时间、TaskId、提示词、
-计费要素（时长/分辨率/音频/存储方式）与产物路径——可作成本审计与
-生成追溯，用文本编辑器、Excel 或 `jq` 均可查询：
+所有生成节点运行（成功或失败）都会自动写入执行台账
+`output/vod_aigc/execution_history.jsonl`（时间、TaskId、提示词、计费要素、产物路径），
+可用 `jq` / Excel 查询：
 
 ```bash
-jq -r '.[] | [.time, .status, .resolution, .duration] | @tsv' output/vod_aigc/execution_history.jsonl
+jq -r '[.time, .status, .resolution, .duration, .estimated_cost] | @tsv' output/vod_aigc/execution_history.jsonl
 ```
 
-## 凭据字段标注可选（v1.6.1）
-
-SecretId / SecretKey / SubAppId 输入框显示名改为 `secret_id (optional)` 等（键名不变，代码兼容零改动；
-前端通过 `display_name` 机制渲染显示名）。
-
-## 首次使用弹窗 + 测试入库（v1.6.0）
-
-- **首次使用弹窗**：在画布上添加任一生成/查询节点且凭据未配置时，右下弹出设置框，填写后一键写入
-  `credentials.json`（走本地 HTTP 接口，密钥不进入工作流 JSON）；每会话只弹一次
-- **凭据字段提示**：SecretId / SecretKey / SubAppId 工具提示标注「选填」，说明默认读取 credentials.json
-- **测试入库**：`tests/test_nodes.py` 随仓库分发，65 项自包含测试（已脱敏，无真实凭据）：
-  ```bash
-  python tests/test_nodes.py        # 无需安装任何依赖（自带 ComfyUI/numpy/PIL stub）
-  ```
-
-## 凭据一次配置（v1.5.0）
-
-节点上的 secret_id / secret_key / sub_app_id **全部留空**即可——解析优先级：
-节点输入 > 环境变量（`TENCENTCLOUD_SECRET_ID` / `TENCENTCLOUD_SECRET_KEY` / `VOD_SUB_APP_ID`）> 节点包内 `credentials.json`。
-
-```bash
-# 首次配置：复制模板并填入真实密钥（该文件已被 .gitignore 排除，永不入库/不出现在工作流 JSON）
-cp credentials.example.json credentials.json
-```
-
-密钥从此只存在这一个文件里，不随工作流 JSON 传播（报错粘贴、分享工作流都不会泄露）。
-
-## 拒绝原因透传（v1.4.1）
-
-- FINISH 但无输出文件时，优先透传腾讯云的拒绝原因（ErrCode / ErrCodeExt / Message），如
-  `H3 任务被拒绝（ErrCode=70000 ErrCodeExt=InvalidParameter.ViolationContent Message=Input Prompt violates policy）`，
-  并附内容安全提示——不再误报"任务成功但未找到输出文件 URL"
-- 所有任务级错误（拒绝/失败/超时）均携带 TaskId
-- 台账失败记录自动回填 task_id
-
-## 计费与链接（v1.4.0）
-
-- **费用预估**：每条记录新增 `seconds_billed`（不足 5 秒按 5 秒）与 `estimated_cost`（元），
-  单价按《AIGC价格指南》配置——环境变量 `VOD_PRICE_768P / VOD_PRICE_1080P / VOD_PRICE_2K / VOD_PRICE_4K`
-  （元/秒），未配置时显示「¥未配置单价」：
-  ```bash
-  export VOD_PRICE_768P=0.1   # 示例值，按你的价格指南填写
-  export VOD_PRICE_2K=0.3
-  ```
-- **可点击链接**：浮窗中「视频URL」直接打开在线视频；「本地文件」通过 ComfyUI `/view`
-  接口在浏览器播放（不依赖本机播放器）。
-
-## 台账显示（v1.3.0）
-
-「VOD AIGC - 查看执行台账」节点执行完成后，台账文本会以**右下角浮窗**显示
-（双击浮窗外的「×」关闭）。浮窗由节点包内置的前端扩展渲染——ComfyUI
-原生的 Job History 面板不显示纯文本输出，这是社区标准做法。
-
-## 安装（git clone）
+## 安装
 
 ```bash
 cd custom_nodes
@@ -87,23 +32,55 @@ git clone https://github.com/yulewang56/tencent-vod-aigc.git
 ```
 
 重启 ComfyUI（或前端左下角 Restart），右键画布 → 搜索 `VOD AIGC` 即可看到节点。
-
 更新：`cd custom_nodes/tencent-vod-aigc && git pull`
 
 > 也可以下载 zip 解压后放进 `custom_nodes/`（文件夹名随意，不影响加载）。
 
-## 密钥配置（二选一）
+## 首次使用（30 秒）
 
-**方式 A：节点里直接填**（SecretId / SecretKey / SubAppId 三个输入框）
+**方式一（推荐）：首次使用弹窗**
 
-**方式 B：环境变量**（节点留空即可）
+在画布上添加任一生成/查询节点，若凭据未配置会自动弹出设置框——填写
+SecretId / SecretKey / SubAppId（单价为选填，用于台账费用预估）→ 保存。
+密钥只写入本地配置文件，不进入工作流 JSON。
+
+**方式二：手动创建配置文件**
+
 ```bash
-export TENCENTCLOUD_SECRET_ID="你的SecretId"
-export TENCENTCLOUD_SECRET_KEY="你的SecretKey"
-export VOD_SUB_APP_ID="1500044236"
+cd custom_nodes/tencent-vod-aigc
+cp tencent-vod-config.example.json tencent-vod-config.json
+# 编辑 tencent-vod-config.json，填入你的密钥（该文件已被 .gitignore 排除，永不入库）
 ```
 
-> 密钥来源：腾讯云控制台 CAM（https://console.cloud.tencent.com/cam/capi）；SubAppId 在云点播控制台「应用管理」获取。
+配置结构：
+
+```json
+{
+  "secret_id": "AKIDxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "secret_key": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "sub_app_id": "1500000000",
+  "prices": { "768P": 0.1, "1080P": 0.2, "2K": 0.3, "4K": 0.5 }
+}
+```
+
+> 密钥来源：腾讯云控制台 CAM（https://console.cloud.tencent.com/cam/capi）；
+> SubAppId 在云点播控制台「应用管理」获取。
+
+## 配置详解
+
+**凭据解析优先级**：节点输入（填了就用）> 环境变量 > `tencent-vod-config.json`
+
+| 配置项 | 环境变量（可选） | 配置文件 |
+|---|---|---|
+| SecretId | `TENCENTCLOUD_SECRET_ID` | `secret_id` |
+| SecretKey | `TENCENTCLOUD_SECRET_KEY` | `secret_key` |
+| SubAppId | `VOD_SUB_APP_ID` | `sub_app_id` |
+| 单价（元/秒） | `VOD_PRICE_768P` / `VOD_PRICE_1080P` / `VOD_PRICE_2K` / `VOD_PRICE_4K` | `prices` |
+
+单价用于台账**费用预估**（不足 5 秒按 5 秒计费），示例值 `0.1/0.2/0.3/0.5` 不是真实价格——
+请按《AIGC价格指南（客户）》填写；未配置时显示「¥未配置单价」。
+
+> 旧版 `credentials.json`（v1.7.0 之前）仍可被读取，但新配置请写入 `tencent-vod-config.json`。
 
 ## 参数说明（对应文档 3.17）
 
@@ -127,6 +104,7 @@ export VOD_SUB_APP_ID="1500044236"
 ## 典型用法
 
 **本地生图 → H3 生视频 → 超分**（专业管线雏形）：
+
 ```
 Load Image（SD/Flux 生图）
     ↓
@@ -139,8 +117,17 @@ VideoHelperSuite / 其他视频节点 → 后处理
 
 | 现象 | 原因 / 处理 |
 |---|---|
-| `接口错误 InvalidParameter.VoilationContent` | Prompt 或素材命中内容合规拦截，修改提示词 |
-| `任务失败 (ErrCode=...)` | 查看 message；70000 类错误结合 message 判断 |
+| `H3 任务被拒绝（ErrCode=70000 ErrCodeExt=InvalidParameter.ViolationContent ...）` | Prompt 或素材命中内容合规拦截，修改提示词后重试 |
+| `任务失败 (ErrCode=...)` | 查看 message；错误信息均携带 TaskId，可去控制台核对 |
 | `无法连接 ... (检查网络/代理)` | 本地网络/代理问题 |
-| `任务成功但未找到输出文件 URL` | 响应结构异常，用「查询任务」节点看 raw_json，截图反馈 |
 | 生成很慢 | 视频生成需数分钟，轮询间隔默认 10s；错峰可省成本 |
+
+## 测试
+
+```bash
+python tests/test_nodes.py        # 65 项自包含测试，无需安装任何依赖（自带 ComfyUI/numpy/PIL stub）
+```
+
+## 更新日志
+
+见 [CHANGELOG.md](CHANGELOG.md)。

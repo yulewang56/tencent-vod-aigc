@@ -127,27 +127,44 @@ def _call_api(secret_id: str, secret_key: str, region: str, endpoint: str, actio
     return response
 
 
-_CRED_FILE_HINT = ("custom_nodes/tencent-vod-aigc/credentials.json"
-                   "（模板见同目录 credentials.example.json）")
+_CONFIG_FILE = "tencent-vod-config.json"
+_LEGACY_CRED_FILE = "credentials.json"
+_CRED_FILE_HINT = ("custom_nodes/tencent-vod-aigc/tencent-vod-config.json"
+                   "（模板见同目录 tencent-vod-config.example.json）")
 
 
-def _load_credentials_file():
-    """从节点包目录读取 credentials.json（未配置/格式错误返回空 dict）。"""
-    try:
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "credentials.json")
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return {k: str(data.get(k) or "").strip() for k in ("secret_id", "secret_key", "sub_app_id")}
-    except FileNotFoundError:
-        return {}
-    except Exception as e:
-        print(f"[tencent-vod-aigc] credentials.json 读取失败（忽略）: {e}")
-        return {}
+def _load_config_file(dir_path=None):
+    """读取统一配置文件 tencent-vod-config.json；不存在时兼容旧版 credentials.json。
+
+    返回 {"secret_id", "secret_key", "sub_app_id", "prices": {分辨率: 单价}}，
+    文件缺失/损坏返回空结构。
+    """
+    base = dir_path or os.path.dirname(os.path.abspath(__file__))
+    for name in (_CONFIG_FILE, _LEGACY_CRED_FILE):
+        try:
+            with open(os.path.join(base, name), "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            continue
+        except Exception as e:
+            print(f"[tencent-vod-aigc] {name} 读取失败（忽略）: {e}")
+            continue
+        result = {k: str(data.get(k) or "").strip() for k in ("secret_id", "secret_key", "sub_app_id")}
+        result["prices"] = {}
+        prices = data.get("prices")
+        if isinstance(prices, dict):
+            for k, v in prices.items():
+                try:
+                    result["prices"][k] = float(v)
+                except (TypeError, ValueError):
+                    pass
+        return result
+    return {"secret_id": "", "secret_key": "", "sub_app_id": "", "prices": {}}
 
 
 def _resolve_credentials(secret_id, secret_key, sub_app_id):
-    """凭据解析优先级：节点输入 > 环境变量 > credentials.json。"""
-    file_creds = _load_credentials_file()
+    """凭据解析优先级：节点输入 > 环境变量 > tencent-vod-config.json。"""
+    file_creds = _load_config_file()
     sid = (secret_id or "").strip() or os.environ.get("TENCENTCLOUD_SECRET_ID", "").strip() or file_creds.get("secret_id")
     skey = (secret_key or "").strip() or os.environ.get("TENCENTCLOUD_SECRET_KEY", "").strip() or file_creds.get("secret_key")
     sub = (sub_app_id or "").strip() or os.environ.get("VOD_SUB_APP_ID", "").strip() or file_creds.get("sub_app_id")
@@ -165,28 +182,41 @@ def _resolve_credentials(secret_id, secret_key, sub_app_id):
 
 def _credentials_configured() -> bool:
     """凭据是否已可解析（文件或环境变量任一可用即视为已配置，供前端弹窗判断）。"""
-    file_creds = _load_credentials_file()
+    file_creds = _load_config_file()
     file_ok = bool(file_creds.get("secret_id") and file_creds.get("secret_key") and file_creds.get("sub_app_id"))
     env_ok = bool(os.environ.get("TENCENTCLOUD_SECRET_ID") and os.environ.get("TENCENTCLOUD_SECRET_KEY")
                   and os.environ.get("VOD_SUB_APP_ID"))
     return file_ok or env_ok
 
 
-def _save_credentials_file(secret_id, secret_key, sub_app_id, path=None) -> str:
-    """校验并写入 credentials.json（首次使用弹窗保存用），返回文件路径。"""
+def _save_config_file(secret_id, secret_key, sub_app_id, prices=None, path=None) -> str:
+    """校验并写入统一配置文件（凭据必填；单价选填，仅合并非空数值项），返回文件路径。"""
     sid, skey, sub = (secret_id or "").strip(), (secret_key or "").strip(), (sub_app_id or "").strip()
     if not sid or not skey:
         raise ValueError("SecretId 与 SecretKey 不能为空")
     if not sub.isdigit():
         raise ValueError(f"SubAppId 必须为纯数字，当前值: {sub}")
-    path = path or os.path.join(os.path.dirname(os.path.abspath(__file__)), "credentials.json")
+    path = path or os.path.join(os.path.dirname(os.path.abspath(__file__)), _CONFIG_FILE)
+    existing = _load_config_file(os.path.dirname(path)) if os.path.exists(path) else {}
+    merged = dict(existing.get("prices", {}))
+    for res, val in (prices or {}).items():
+        if val is None or val == "":
+            continue
+        try:
+            merged[str(res)] = float(val)
+        except (TypeError, ValueError):
+            raise ValueError(f"单价 {res} 必须是数字，当前值: {val}")
     with open(path, "w", encoding="utf-8") as f:
-        json.dump({"secret_id": sid, "secret_key": skey, "sub_app_id": sub}, f, indent=2, ensure_ascii=False)
+        json.dump({"secret_id": sid, "secret_key": skey, "sub_app_id": sub, "prices": merged},
+                  f, indent=2, ensure_ascii=False)
     return path
 
 
 def _register_http_routes():
-    """注册凭据状态查询 / 保存接口，供前端首次使用弹窗调用（非 ComfyUI 环境自动跳过）。"""
+    """注册配置状态查询 / 保存接口，供前端首次使用弹窗调用（非 ComfyUI 环境自动跳过）。
+
+    规范路径 /tencent-vod-aigc/config；/credentials/* 为旧版别名（兼容旧前端缓存）。
+    """
     try:
         from aiohttp import web
         from server import PromptServer
@@ -194,22 +224,27 @@ def _register_http_routes():
         return
     routes = PromptServer.instance.routes
 
-    @routes.get("/tencent-vod-aigc/credentials/status")
-    async def credentials_status(_request):
-        return web.json_response({"configured": _credentials_configured()})
+    async def config_status(_request):
+        cfg = _load_config_file()
+        return web.json_response({"configured": _credentials_configured(),
+                                  "prices": cfg.get("prices", {})})
 
-    @routes.post("/tencent-vod-aigc/credentials")
-    async def credentials_save(request):
+    async def config_save(request):
         try:
             body = await request.json()
         except Exception:
             return web.json_response({"ok": False, "error": "请求体不是合法 JSON"}, status=400)
         try:
-            path = _save_credentials_file(body.get("secret_id", ""), body.get("secret_key", ""),
-                                          body.get("sub_app_id", ""))
+            path = _save_config_file(body.get("secret_id", ""), body.get("secret_key", ""),
+                                     body.get("sub_app_id", ""), body.get("prices"))
         except ValueError as e:
             return web.json_response({"ok": False, "error": str(e)}, status=400)
         return web.json_response({"ok": True, "path": path})
+
+    routes.get("/tencent-vod-aigc/config")(config_status)
+    routes.get("/tencent-vod-aigc/credentials/status")(config_status)  # 旧版别名
+    routes.post("/tencent-vod-aigc/config")(config_save)
+    routes.post("/tencent-vod-aigc/credentials")(config_save)          # 旧版别名
 
 
 # ---------------------------------------------------------------- 工具函数
@@ -366,21 +401,27 @@ def _append_history(record: dict):
         print(f"[tencent-vod-aigc] 执行台账写入失败: {e}")
 
 
-# 单价（元/秒），按《AIGC价格指南（客户）》配置；可用环境变量覆盖，如 VOD_PRICE_2K=0.5
-_PRICES_PER_SECOND = {
-    "768P": float(os.environ.get("VOD_PRICE_768P", "0")),
-    "1080P": float(os.environ.get("VOD_PRICE_1080P", "0")),
-    "2K": float(os.environ.get("VOD_PRICE_2K", "0")),
-    "4K": float(os.environ.get("VOD_PRICE_4K", "0")),
-}
 _MIN_BILLED_SECONDS = 5  # 每次任务不足 5 秒按 5 秒计费
+
+
+def _price_for(resolution: str) -> float:
+    """单价（元/秒）解析：环境变量 VOD_PRICE_<分辨率> > tencent-vod-config.json prices > 0。"""
+    env = os.environ.get(f"VOD_PRICE_{str(resolution or '').upper()}")
+    if env is not None and env.strip():
+        try:
+            return float(env.strip())
+        except ValueError:
+            pass
+    try:
+        return float(_load_config_file().get("prices", {}).get(resolution, 0.0))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _estimate_cost(resolution: str, duration: int) -> tuple:
     """按计费规则估算费用：秒数 = max(时长, 5)，费用 = 秒数 × 单价（元）。"""
     seconds_billed = max(int(duration or 0), _MIN_BILLED_SECONDS)
-    rate = _PRICES_PER_SECOND.get(resolution or "", 0.0)
-    return seconds_billed, round(seconds_billed * rate, 4)
+    return seconds_billed, round(seconds_billed * _price_for(resolution), 4)
 
 
 def _view_url_for(path: str) -> str:
