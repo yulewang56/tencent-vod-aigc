@@ -1,0 +1,13 @@
+[project]
+name = "tencent-vod-aigc"
+description = "ComfyUI custom nodes for Tencent Cloud VOD AIGC (MiniMax Hailuo H3 video generation) — pure stdlib, no extra pip dependencies"
+version = "1.0.0"
+license = { file = "LICENSE" }
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/yulewang56/tencent-vod-aigc"
+
+[tool.comfy]
+PublisherId = "YOUR_PUBLISHER_ID"
+DisplayName = "Tencent VOD AIGC"
