@@ -44,6 +44,15 @@ def _hmac_sha256(key: bytes, msg: str) -> bytes:
     return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
 
 
+def _canonical_headers(headers: dict, action: str) -> str:
+    """TC3 规范：canonical headers 中 x-tc-action 的值必须为小写（HTTP 头保持原样）。"""
+    parts = []
+    for key in sorted(headers.keys()):
+        value = action.lower() if key.lower() == "x-tc-action" else str(headers[key]).strip()
+        parts.append(f"{key.lower()}:{value}\n")
+    return "".join(parts)
+
+
 def _sign_request(secret_id: str, secret_key: str, region: str, endpoint: str, action: str, payload: dict):
     """构造腾讯云 TC3-HMAC-SHA256 签名，返回 (headers, body_bytes)。"""
     ts = int(time.time())
@@ -60,9 +69,8 @@ def _sign_request(secret_id: str, secret_key: str, region: str, endpoint: str, a
     if region:
         headers["X-TC-Region"] = region
 
-    signed_keys = sorted(headers.keys())
-    signed_headers = ";".join(k.lower() for k in signed_keys)
-    canonical_headers = "".join(f"{k.lower()}:{str(headers[k]).strip()}\n" for k in signed_keys)
+    signed_headers = ";".join(k.lower() for k in sorted(headers.keys()))
+    canonical_headers = _canonical_headers(headers, action)
 
     canonical_request = "\n".join([
         "POST", "/", "",
