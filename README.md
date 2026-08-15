@@ -123,6 +123,7 @@ VideoHelperSuite / 其他视频节点 → 后处理
 |---|---|
 | `H3 任务被拒绝（ErrCode=70000 ErrCodeExt=InvalidParameter.ViolationContent ...）` | Prompt 或素材命中内容合规拦截，修改提示词后重试 |
 | `扩展名 ".m4s" 不支持, 允许: .mp4, .mov` | 参考视频 URL 必须是 .mp4/.mov 直链（B 站/抖音分片如 .m4s 不被接受）；网页视频请先下载合并成 .mp4 走 `ref_video_paths` |
+| `ContentModerationFailed: content blocked by moderation` | 内容审核拦截。**实测参考视频带音轨（meme 音乐/人声）可能触发**——先去音轨再试：`ffmpeg -i 片段.mp4 -an 无声.mp4`；仍被拒则换片段/素材 |
 | `任务失败 (ErrCode=...)` | 查看 message；错误信息均携带 TaskId，可去控制台核对 |
 | `无法连接 ... (检查网络/代理)` | 本地网络/代理问题 |
 | 生成很慢 | 视频生成需数分钟，轮询间隔默认 10s；错峰可省成本 |

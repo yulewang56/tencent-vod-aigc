@@ -2,6 +2,12 @@
 
 格式：[语义化版本](https://semver.org/lang/zh-CN/)，全部提交记录见 [GitHub Releases](https://github.com/yulewang56/tencent-vod-aigc/releases)。
 
+## [1.12.7] - 2026-08-16
+
+### 文档
+- 常见错误表补充：参考视频带音轨可能触发 `ContentModerationFailed`（实测 meme 音乐/人声命中），
+  先去音轨再试（`ffmpeg -i x.mp4 -an 无声.mp4`）
+
 ## [1.12.6] - 2026-08-16
 
 ### 修复
