@@ -2,6 +2,13 @@
 
 格式：[语义化版本](https://semver.org/lang/zh-CN/)，全部提交记录见 [GitHub Releases](https://github.com/yulewang56/tencent-vod-aigc/releases)。
 
+## [1.12.2] - 2026-08-15
+
+### 变更
+- 本地文件名命名组合：填 `filename` 时改为 `<filename>_<taskId尾8位>.<扩展名>`
+  （如 `我的视频_3f9c2ab1.mp4`）——文件与台账/任务可追溯，taskId 尾号天然唯一，
+  多次生成同名 hint 不会撞名；重名兜底仍加序号（`_1`）
+
 ## [1.12.1] - 2026-08-15
 
 ### 修复

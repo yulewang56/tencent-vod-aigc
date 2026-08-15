@@ -370,7 +370,8 @@ def _resolve_save_name(url: str, task_id: str, name_hint: str = "", out_dir=None
     original = urllib.parse.unquote(urllib.parse.urlparse(url).path.split("/")[-1]) or "aigcGenFile.mp4"
     ext = os.path.splitext(original)[1]
     if name_hint:
-        base = name_hint
+        # 命名组合：<filename>_<taskId尾8位> —— 文件与台账/任务可追溯，且 taskId 尾号天然唯一
+        base = f"{name_hint}_{task_id[-8:]}"
         if ext and not base.lower().endswith(ext.lower()):
             base += ext
     else:
