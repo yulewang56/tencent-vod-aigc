@@ -194,7 +194,7 @@ def fake_success_api(sid, sk, reg, ep, action, payload):
             "AigcVideoTask": {"Status": "FINISH", "Output": {"FileInfos": [
                 {"FileUrl": "https://cdn/x.mp4"}]}}}
 nodes._call_api = fake_success_api
-nodes._download_video = lambda url, task_id, on_progress=None: "/tmp/comfy_output/vod_aigc/t_ledger_1.mp4"
+nodes._download_video = lambda url, task_id, on_progress=None, name_hint=None: "/tmp/comfy_output/vod_aigc/t_ledger_1.mp4"
 
 params = {"secret_id": "x", "secret_key": "y", "sub_app_id": "1500044236",
           "duration": 5, "resolution": "1080P", "aspect_ratio": "16:9",
@@ -394,7 +394,7 @@ captured2 = {}
 orig_b64 = nodes._image_tensor_to_base64
 orig_dl = nodes._download_video
 nodes._image_tensor_to_base64 = lambda t, i: f"b64-{i}"
-nodes._download_video = lambda url, task_id, on_progress=None: "/tmp/fake.png"
+nodes._download_video = lambda url, task_id, on_progress=None, name_hint=None: "/tmp/fake.png"
 def fake_img_call(secret_id, secret_key, region, endpoint, action, payload):
     if action == "CreateAigcImageTask":
         captured2["payload"] = payload
@@ -406,7 +406,7 @@ orig_call2 = nodes._call_api
 nodes._call_api = fake_img_call
 try:
     node_obj = nodes.TencentVODAIGCImageTask()
-    tid, url, path = node_obj.generate("一只猫在窗边", secret_id="AKIDx", secret_key="sk",
+    tid, url, path, preview = node_obj.generate("一只猫在窗边", secret_id="AKIDx", secret_key="sk",
                                        sub_app_id="1500044236", ref_image=FakeTensor(),
                                        model="Jimeng 4.0", storage_mode="Temporary",
                                        resolution="1080P", aspect_ratio="16:9",
@@ -460,7 +460,7 @@ check("og: high tier version", og_payload2["ModelVersion"] == "image2_high")
 captured3 = {}
 dl_calls = []
 orig_dl3 = nodes._download_video
-nodes._download_video = lambda url, task_id, on_progress=None: (dl_calls.append(url) or "/tmp/g.png")
+nodes._download_video = lambda url, task_id, on_progress=None, name_hint=None: (dl_calls.append(url) or "/tmp/g.png")
 def fake_img_call3(secret_id, secret_key, region, endpoint, action, payload):
     if action == "CreateAigcImageTask":
         return {"TaskId": "1500044236-AigcImageTask-multi01t"}
@@ -472,7 +472,7 @@ orig_call3 = nodes._call_api
 nodes._call_api = fake_img_call3
 try:
     node_obj = nodes.TencentVODAIGCImageTask()
-    tid, url_out, path_out = node_obj.generate("p", secret_id="AKIDx", secret_key="sk",
+    tid, url_out, path_out, preview3 = node_obj.generate("p", secret_id="AKIDx", secret_key="sk",
                                                sub_app_id="1500044236", model="OG image2_medium",
                                                storage_mode="Temporary", resolution="1K",
                                                aspect_ratio="9:16", output_image_count=3,
@@ -518,3 +518,22 @@ try:
     check("img-price: bad price raises", False)
 except ValueError as e:
     check("img-price: bad price raises", "生图单价" in str(e))
+
+# ---- 18. 文件名与图片张量（v1.12.0）----
+import tempfile as _tf3
+_tmp3 = _tf3.mkdtemp()
+# 18.1 _resolve_save_name：默认 / 自定义 / 补扩展名 / 重名序号
+n1 = nodes._resolve_save_name("http://cdn/a/aigcImageGenFile.png", "1500044236-AigcImageTask-abc123t", "", _tmp3)
+check("name: default uses task tail", n1.endswith("_aigcImageGenFile.png") and "abc123t" in n1, n1)
+n2 = nodes._resolve_save_name("http://cdn/a/aigcImageGenFile.png", "t", "我的图", _tmp3)
+check("name: hint keeps ext", n2 == "我的图.png", n2)
+n3 = nodes._resolve_save_name("http://cdn/a/v.mp4", "t", "clip", _tmp3)
+check("name: hint appends ext", n3 == "clip.mp4", n3)
+open(os.path.join(_tmp3, "clip.mp4"), "w").close()
+n4 = nodes._resolve_save_name("http://cdn/a/v.mp4", "t", "clip", _tmp3)
+check("name: dup gets suffix", n4 == "clip_1.mp4", n4)
+# 18.2 图片张量：测试环境（stub）下优雅返回 None
+check("tensor: graceful None in stub env", nodes._paths_to_image_tensor(["/tmp/nonexist.png"]) is None)
+# 18.3 图片节点 4 输出（preview_image 槽位）
+img_node_meta = nodes.TencentVODAIGCImageTask
+check("tensor: 4 outputs declared", len(img_node_meta.RETURN_TYPES) == 4 and img_node_meta.RETURN_NAMES[-1] == "preview_image")

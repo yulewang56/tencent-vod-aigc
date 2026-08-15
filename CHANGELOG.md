@@ -2,6 +2,14 @@
 
 格式：[语义化版本](https://semver.org/lang/zh-CN/)，全部提交记录见 [GitHub Releases](https://github.com/yulewang56/tencent-vod-aigc/releases)。
 
+## [1.12.0] - 2026-08-15
+
+### 新增
+- **图片节点 `preview_image` 输出**：下载的图片转成 IMAGE 张量（多图合成 batch），
+  获得 ComfyUI 原生预览并可直连下游节点；转换失败返回 None 不阻塞主流程
+- **生成节点本地文件名参数**：4 个生成节点新增选填 `filename`（不含扩展名，自动补全；
+  多图自动加序号去重；留空保持 task_id 尾号 + URL 文件名）
+
 ## [1.11.0] - 2026-08-15
 
 ### 新增

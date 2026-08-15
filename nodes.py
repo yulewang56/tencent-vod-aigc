@@ -365,7 +365,41 @@ def _wait_for_task(secret_id, secret_key, region, endpoint, sub_app_id, task_id,
         time.sleep(max(1, int(poll_interval)))
 
 
-def _download_video(url: str, task_id: str, on_progress=None) -> str:
+def _resolve_save_name(url: str, task_id: str, name_hint: str = "", out_dir=None) -> str:
+    """本地保存文件名：name_hint 优先（自动补扩展名、重名加序号），否则 task_id 尾号 + URL 文件名。"""
+    original = urllib.parse.unquote(urllib.parse.urlparse(url).path.split("/")[-1]) or "aigcGenFile.mp4"
+    ext = os.path.splitext(original)[1]
+    if name_hint:
+        base = name_hint
+        if ext and not base.lower().endswith(ext.lower()):
+            base += ext
+    else:
+        base = f"{task_id[-8:]}_{original}"
+    out_dir = out_dir or os.path.join(folder_paths.get_output_directory(), "vod_aigc")
+    name = base
+    counter = 1
+    while os.path.exists(os.path.join(out_dir, name)):  # 重名去重（多图同 hint 场景）
+        stem, e = os.path.splitext(base)
+        name = f"{stem}_{counter}{e}"
+        counter += 1
+    return name
+
+
+def _paths_to_image_tensor(paths):
+    """把本地图片列表转成 ComfyUI IMAGE 张量（B,H,W,C float 0-1）；失败返回 None 不阻塞主流程。"""
+    try:
+        import torch
+        frames = []
+        for p in paths:
+            with Image.open(p) as im:
+                arr = np.asarray(im.convert("RGB"), dtype=np.float32) / 255.0
+            frames.append(torch.from_numpy(arr))
+        return torch.stack(frames) if frames else None
+    except Exception:
+        return None
+
+
+def _download_video(url: str, task_id: str, on_progress=None, name_hint=None) -> str:
     """把生成的视频下载到 ComfyUI output/vod_aigc/ 目录。
 
     流式下载 + 60s 超时 + 进度回调；失败时抛出包含可手动下载 URL 的错误，
@@ -374,8 +408,7 @@ def _download_video(url: str, task_id: str, on_progress=None) -> str:
 
     out_dir = os.path.join(folder_paths.get_output_directory(), "vod_aigc")
     os.makedirs(out_dir, exist_ok=True)
-    original = os.path.basename(urllib.parse.urlparse(url).path) or "aigcVideoGenFile.mp4"
-    name = f"{task_id[-8:]}_{original}"
+    name = _resolve_save_name(url, task_id, name_hint or "", out_dir)
     path = os.path.join(out_dir, name)
 
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -498,9 +531,10 @@ def _ledger(mode):
             m = mode or ("i2i" if (kwargs.get("ref_image") is not None
                                    or (kwargs.get("ref_image_urls") or "").strip()) else "t2i")
             try:
-                task_id, url, path = fn(self, prompt, **kwargs)
+                result = fn(self, prompt, **kwargs)  # 3 元组（视频）或 4 元组（生图含 preview_image）
+                task_id, url, path = result[0], result[1], result[2]
                 _append_history(_base_record(m, prompt, kwargs, task_id, url, path))
-                return (task_id, url, path)
+                return result
             except Exception as e:
                 _append_history(_base_record(m, prompt, kwargs,
                                              task_id=getattr(e, "task_id", ""), error=str(e)))
@@ -532,6 +566,7 @@ def _output_config_inputs():
         "storage_mode": (STORAGE_MODES, {"default": "Temporary", "tooltip": "Temporary=临时存储(URL 限时有效) / Permanent=永久存储(可后续超分处理)"}),
         "enhance_prompt": (ON_OFF, {"default": "Disabled", "tooltip": "是否启用提示词增强（H3-Context-IR）"}),
         "media_name": ("STRING", {"default": "", "tooltip": "可选，输出文件名/备注"}),
+        "filename": ("STRING", {"default": "", "tooltip": "可选，本地保存文件名（不含扩展名，留空自动命名）"}),
         "region": ("STRING", {"default": DEFAULT_REGION, "tooltip": "腾讯云地域，如 ap-guangzhou"}),
         "endpoint": ("STRING", {"default": "", "tooltip": "API 地址，留空用 vod.tencentcloudapi.com（新版可用 gateway.vod-qcloud.com）"}),
         "input_region": ("STRING", {"default": "", "tooltip": "可选 InputRegion，素材在海外时填 oversea"}),
@@ -631,7 +666,8 @@ class TencentVODH3TextToVideo:
                                 on_progress=lambda t: _set_status(self, t))
         url = result["urls"][0]
         _set_status(self, "下载视频…")
-        path = _download_video(url, task_id, on_progress=lambda t: _set_status(self, t))
+        path = _download_video(url, task_id, on_progress=lambda t: _set_status(self, t),
+                               name_hint=kwargs.get("filename"))
         _set_status(self, "完成")
         return (task_id, url, path)
 
@@ -699,7 +735,8 @@ class TencentVODH3ImageToVideo:
                                 on_progress=lambda t: _set_status(self, t))
         url = result["urls"][0]
         _set_status(self, "下载视频…")
-        path = _download_video(url, task_id, on_progress=lambda t: _set_status(self, t))
+        path = _download_video(url, task_id, on_progress=lambda t: _set_status(self, t),
+                               name_hint=kwargs.get("filename"))
         _set_status(self, "完成")
         return (task_id, url, path)
 
@@ -803,7 +840,8 @@ class TencentVODH3ReferenceToVideo:
                                 on_progress=lambda t: _set_status(self, t))
         url = result["urls"][0]
         _set_status(self, "下载视频…")
-        path = _download_video(url, task_id, on_progress=lambda t: _set_status(self, t))
+        path = _download_video(url, task_id, on_progress=lambda t: _set_status(self, t),
+                               name_hint=kwargs.get("filename"))
         _set_status(self, "完成")
         return (task_id, url, path)
 
@@ -828,6 +866,7 @@ class TencentVODAIGCImageTask:
                                            "tooltip": "生成张数（OG 支持 1-8；仅 >1 时传给接口）"}),
             "output_format": (["", "png", "jpeg"], {"default": "",
                                                     "tooltip": "输出格式（OG 支持 png/jpeg；留空跟随模型默认）"}),
+            "filename": ("STRING", {"default": "", "tooltip": "可选，本地保存文件名（不含扩展名，留空自动命名；多图自动加序号）"}),
             "ref_image": ("IMAGE", {"tooltip": "参考图（图生图）。多张请先合成 batch，每帧一张，最多 9 张；或用 ref_image_urls"}),
             "ref_image_urls": ("STRING", {"multiline": True, "default": "",
                                           "tooltip": "参考图 URL（图生图），每行一个，最多 9 个"}),
@@ -842,8 +881,8 @@ class TencentVODAIGCImageTask:
         }
         return {"required": required, "optional": optional}
 
-    RETURN_TYPES = ("STRING", "STRING", "STRING")
-    RETURN_NAMES = ("task_id", "image_url", "image_path")
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "IMAGE")
+    RETURN_NAMES = ("task_id", "image_url", "image_path", "preview_image")
     FUNCTION = "generate"
     CATEGORY = "Tencent VOD AIGC"
     OUTPUT_NODE = True
@@ -888,9 +927,11 @@ class TencentVODAIGCImageTask:
         if not urls:
             raise RuntimeError("生图任务未返回输出文件 URL")
         _set_status(self, f"下载图片…（{len(urls)} 张）")
-        paths = [_download_video(u, task_id, on_progress=lambda t: _set_status(self, t)) for u in urls]
+        paths = [_download_video(u, task_id, on_progress=lambda t: _set_status(self, t),
+                                 name_hint=kwargs.get("filename")) for u in urls]
         _set_status(self, "完成")
-        return (task_id, "\n".join(urls), "\n".join(paths))
+        # preview_image：本地图片 → IMAGE 张量（原生预览 + 可接下游）；失败返回 None 不阻塞
+        return (task_id, "\n".join(urls), "\n".join(paths), _paths_to_image_tensor(paths))
 
 
 class TencentVODAIGCQueryTask:
