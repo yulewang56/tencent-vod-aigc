@@ -101,6 +101,7 @@ cp tencent-vod-config.example.json tencent-vod-config.json
 - 图片：单张 ≤30MB，宽高 [256, 5760]，比例 5:2~2:5
 - 参考视频：单段 ≤50MB、2–15 秒、总时长 ≤15 秒
 - 参考音频：单段 ≤15MB、2–15 秒，**不能单独输入**，必须配图/视频
+- 本地素材路径支持 `input/`、`output/` 相对前缀（如 `input/ref.mp4`），或绝对路径
 - Base64 传参总大小 ≤70MB；混合输入总数 ≤12 个文件
 - Prompt ≤7000 字符
 
@@ -128,7 +129,7 @@ VideoHelperSuite / 其他视频节点 → 后处理
 ## 测试
 
 ```bash
-python tests/test_nodes.py        # 105 项自包含测试，无需安装任何依赖（自带 ComfyUI/numpy/PIL stub）
+python tests/test_nodes.py        # 113 项自包含测试，无需安装任何依赖（自带 ComfyUI/numpy/PIL stub）
 ```
 
 ## 更新日志

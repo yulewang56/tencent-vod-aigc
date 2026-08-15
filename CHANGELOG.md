@@ -2,6 +2,13 @@
 
 格式：[语义化版本](https://semver.org/lang/zh-CN/)，全部提交记录见 [GitHub Releases](https://github.com/yulewang56/tencent-vod-aigc/releases)。
 
+## [1.12.3] - 2026-08-15
+
+### 新增
+- **素材路径支持 input/ output/ 相对前缀**：`ref_video_paths` / `ref_audio_paths` 等本地素材参数
+  填 `input/xxx.mp4` 自动解析到 ComfyUI 输入目录（生态惯例），`output/...` 解析到输出目录；
+  绝对路径照常，纯相对路径兼容旧行为（按进程工作目录）
+
 ## [1.12.2] - 2026-08-15
 
 ### 变更

@@ -8,6 +8,7 @@ import types
 comfy = types.ModuleType("comfy")
 folder_paths = types.ModuleType("comfy.folder_paths")
 folder_paths.get_output_directory = lambda: "/tmp/comfy_output"
+folder_paths.get_input_directory = lambda: "/tmp/comfy_input"
 comfy.folder_paths = folder_paths
 sys.modules["comfy"] = comfy
 sys.modules["comfy.folder_paths"] = folder_paths
@@ -540,3 +541,15 @@ check("tensor: graceful None in stub env", nodes._paths_to_image_tensor(["/tmp/n
 # 18.3 图片节点 4 输出（preview_image 槽位）
 img_node_meta = nodes.TencentVODAIGCImageTask
 check("tensor: 4 outputs declared", len(img_node_meta.RETURN_TYPES) == 4 and img_node_meta.RETURN_NAMES[-1] == "preview_image")
+
+# ---- 19. 素材路径解析（v1.12.3）----
+check("path: absolute passthrough", nodes._resolve_media_path("/abs/a.mp4") == "/abs/a.mp4")
+check("path: input prefix", nodes._resolve_media_path("input/ref.png") == "/tmp/comfy_input/ref.png")
+check("path: output prefix", nodes._resolve_media_path("output/vod_aigc/x.mp4") == "/tmp/comfy_output/vod_aigc/x.mp4")
+check("path: plain relative unchanged", nodes._resolve_media_path("ref.png") == "ref.png")
+check("path: empty unchanged", nodes._resolve_media_path("") == "")
+try:
+    nodes._file_to_base64("input/nonexist.mp4", 1024, "参考视频")
+    check("path: missing file raises", False)
+except ValueError as e:
+    check("path: missing file raises", "input/xxx" in str(e))

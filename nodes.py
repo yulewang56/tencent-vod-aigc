@@ -282,10 +282,23 @@ def _image_tensor_to_base64(image_tensor, frame_index: int = 0) -> str:
     return base64.b64encode(data).decode("ascii")
 
 
+def _resolve_media_path(path: str) -> str:
+    """素材路径解析：绝对路径原样；input/、output/ 前缀解析到 ComfyUI 对应目录；其余按进程工作目录。"""
+    p = (path or "").strip()
+    if not p or os.path.isabs(p):
+        return p
+    for prefix, getter in (("input/", folder_paths.get_input_directory),
+                           ("output/", folder_paths.get_output_directory)):
+        if p.startswith(prefix):
+            return os.path.join(getter(), p[len(prefix):])
+    return p  # 兼容旧行为：相对进程 cwd
+
+
 def _file_to_base64(path: str, max_bytes: int, what: str) -> str:
-    if not os.path.isfile(path):
-        raise ValueError(f"文件不存在: {path}")
-    data = open(path, "rb").read()
+    resolved = _resolve_media_path(path)
+    if not os.path.isfile(resolved):
+        raise ValueError(f"文件不存在: {path}（可用绝对路径，或 input/xxx 相对路径）")
+    data = open(resolved, "rb").read()
     if len(data) > max_bytes:
         raise ValueError(f"{what} 超过 {max_bytes // (1024*1024)}MB 上限: {path}")
     return base64.b64encode(data).decode("ascii")
