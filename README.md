@@ -124,7 +124,7 @@ VideoHelperSuite / 其他视频节点 → 后处理
 ## 测试
 
 ```bash
-python tests/test_nodes.py        # 81 项自包含测试，无需安装任何依赖（自带 ComfyUI/numpy/PIL stub）
+python tests/test_nodes.py        # 90 项自包含测试，无需安装任何依赖（自带 ComfyUI/numpy/PIL stub）
 ```
 
 ## 更新日志
