@@ -439,3 +439,45 @@ if failures:
     print(f"RESULT: {len(failures)} FAILED: {failures}")
     sys.exit(1)
 print("RESULT: ALL PASS")
+
+# ---- 16. OG Image2 模型（v1.10.0，文档 3.14）----
+# 16.1 model 解析与新增参数
+og_payload = nodes._build_image_payload("1500044236", "p", "OG image2_medium",
+                                        {"storage_mode": "Permanent", "resolution": "1K", "aspect_ratio": "9:16",
+                                         "output_image_count": 3, "output_format": "png"})
+check("og: name/version parse", og_payload["ModelName"] == "OG" and og_payload["ModelVersion"] == "image2_medium")
+check("og: OutputImageCount when >1", og_payload["OutputConfig"]["OutputImageCount"] == 3, str(og_payload))
+check("og: OutputFormat passed", og_payload["OutputConfig"]["OutputFormat"] == "png")
+# 16.2 count=1 / format 空 → 不传
+og_payload2 = nodes._build_image_payload("1500044236", "p", "OG image2_high",
+                                         {"storage_mode": "Temporary", "resolution": "1080P", "aspect_ratio": "1:1",
+                                          "output_image_count": 1, "output_format": ""})
+check("og: count=1 omitted", "OutputImageCount" not in og_payload2["OutputConfig"], str(og_payload2))
+check("og: empty format omitted", "OutputFormat" not in og_payload2["OutputConfig"])
+check("og: high tier version", og_payload2["ModelVersion"] == "image2_high")
+# 16.3 多图输出流程：3 张 URL → 3 次下载，输出换行拼接
+captured3 = {}
+dl_calls = []
+orig_dl3 = nodes._download_video
+nodes._download_video = lambda url, task_id, on_progress=None: (dl_calls.append(url) or "/tmp/g.png")
+def fake_img_call3(secret_id, secret_key, region, endpoint, action, payload):
+    if action == "CreateAigcImageTask":
+        return {"TaskId": "1500044236-AigcImageTask-multi01t"}
+    return {"TaskType": "AigcImageTask", "Status": "FINISH",
+            "AigcImageTask": {"Status": "FINISH", "Output": {"FileInfos": [
+                {"FileUrl": "https://cdn/a1.png"}, {"FileUrl": "https://cdn/a2.png"},
+                {"FileUrl": "https://cdn/a3.png"}]}}}
+orig_call3 = nodes._call_api
+nodes._call_api = fake_img_call3
+try:
+    node_obj = nodes.TencentVODAIGCImageTask()
+    tid, url_out, path_out = node_obj.generate("p", secret_id="AKIDx", secret_key="sk",
+                                               sub_app_id="1500044236", model="OG image2_medium",
+                                               storage_mode="Temporary", resolution="1K",
+                                               aspect_ratio="9:16", output_image_count=3,
+                                               poll_interval=3, timeout=60)
+    check("og: 3 urls downloaded", len(dl_calls) == 3, str(dl_calls))
+    check("og: outputs joined by newline", url_out.count("\n") == 2 and path_out.count("\n") == 2, repr(url_out))
+finally:
+    nodes._call_api = orig_call3
+    nodes._download_video = orig_dl3

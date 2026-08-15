@@ -522,18 +522,25 @@ def _build_payload(sub_app_id, prompt, enhance_prompt, oc_values, file_infos=Non
 
 
 def _build_image_payload(sub_app_id, prompt, model, oc_values, file_infos=None):
-    """构造 CreateAigcImageTask 请求体（文档 3.3.2：GEM / Jimeng）。"""
+    """构造 CreateAigcImageTask 请求体（3.3.2 GEM/Jimeng、3.14 GPT-Image2）。"""
     name, _, version = (model or "Jimeng 4.0").partition(" ")
+    cfg = {
+        "StorageMode": oc_values["storage_mode"],
+        "Resolution": oc_values["resolution"],
+        "AspectRatio": oc_values["aspect_ratio"],
+    }
+    count = int(oc_values.get("output_image_count") or 1)
+    if count > 1:
+        cfg["OutputImageCount"] = count  # OG 支持 1-8
+    fmt = (oc_values.get("output_format") or "").strip()
+    if fmt:
+        cfg["OutputFormat"] = fmt        # OG 支持 png/jpeg
     payload = {
         "SubAppId": int(sub_app_id),
         "ModelName": name,
         "ModelVersion": version,
         "Prompt": prompt,
-        "OutputConfig": {
-            "StorageMode": oc_values["storage_mode"],
-            "Resolution": oc_values["resolution"],
-            "AspectRatio": oc_values["aspect_ratio"],
-        },
+        "OutputConfig": cfg,
     }
     if file_infos:
         payload["FileInfos"] = file_infos
@@ -770,12 +777,18 @@ class TencentVODAIGCImageTask:
         required["prompt"] = ("STRING", {"multiline": True, "default": "",
                                          "tooltip": "提示词；图生图时描述参考图中的主体"})
         optional = {
-            "model": (["Jimeng 4.0", "GEM 3.0"], {"default": "Jimeng 4.0",
-                                                   "tooltip": "生图模型（文档 3.3.2 示例）"}),
+            "model": (["Jimeng 4.0", "GEM 3.0", "OG image2_low", "OG image2_medium", "OG image2_high"],
+                     {"default": "Jimeng 4.0",
+                      "tooltip": "生图模型：Jimeng/GEM（3.3.2 示例）；OG = GPT-Image2（3.14 指南），low/medium/high 为质量档位"}),
+            "output_image_count": ("INT", {"default": 1, "min": 1, "max": 8, "step": 1,
+                                           "tooltip": "生成张数（OG 支持 1-8；仅 >1 时传给接口）"}),
+            "output_format": (["", "png", "jpeg"], {"default": "",
+                                                    "tooltip": "输出格式（OG 支持 png/jpeg；留空跟随模型默认）"}),
             "ref_image": ("IMAGE", {"tooltip": "参考图（图生图）。多张请先合成 batch，每帧一张，最多 9 张；或用 ref_image_urls"}),
             "ref_image_urls": ("STRING", {"multiline": True, "default": "",
                                           "tooltip": "参考图 URL（图生图），每行一个，最多 9 个"}),
-            "resolution": (["768P", "1080P"], {"default": "1080P"}),
+            "resolution": (["768P", "1080P", "1K", "2K"], {"default": "1080P",
+                                                             "tooltip": "按模型支持选择（OG 常用 1K/2K）"}),
             "aspect_ratio": (ASPECT_RATIOS, {"default": "16:9"}),
             "storage_mode": (STORAGE_MODES, {"default": "Temporary"}),
             "region": ("STRING", {"default": DEFAULT_REGION}),
@@ -827,11 +840,13 @@ class TencentVODAIGCImageTask:
         result = _wait_for_task(secret_id, secret_key, region, endpoint, sub_app_id, task_id,
                                 kwargs.get("poll_interval", 10), kwargs.get("timeout", 600),
                                 on_progress=lambda t: _set_status(self, t), task_label="生图生成中")
-        url = result["urls"][0]
-        _set_status(self, "下载图片…")
-        path = _download_video(url, task_id, on_progress=lambda t: _set_status(self, t))
+        urls = result["urls"]
+        if not urls:
+            raise RuntimeError("生图任务未返回输出文件 URL")
+        _set_status(self, f"下载图片…（{len(urls)} 张）")
+        paths = [_download_video(u, task_id, on_progress=lambda t: _set_status(self, t)) for u in urls]
         _set_status(self, "完成")
-        return (task_id, url, path)
+        return (task_id, "\n".join(urls), "\n".join(paths))
 
 
 class TencentVODAIGCQueryTask:

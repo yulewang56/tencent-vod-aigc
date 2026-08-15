@@ -12,7 +12,7 @@ ComfyUI 自定义节点：通过**腾讯云 VOD AIGC** 聚合服务调用 **Mini
 | `VOD AIGC - H3 文生视频` | 仅提示词生成视频 |
 | `VOD AIGC - H3 图生视频（首/尾帧）` | 首帧 / 尾帧 / 首尾帧生视频，支持 ComfyUI IMAGE 或图片 URL |
 | `VOD AIGC - H3 多模态参考生视频` | ≤9 图 + ≤3 视频 + ≤3 音频（总数 ≤12），支持本地文件或 URL |
-| `VOD AIGC - 文生图/图生图` | 生图（文档 3.3.2，GEM / Jimeng），可接 ComfyUI 图像或参考图 URL |
+| `VOD AIGC - 文生图/图生图` | 生图：GEM / Jimeng（3.3.2）+ GPT-Image2（3.14，OG image2_low/medium/high），支持多图输出（1-8 张）、输出格式，可接 ComfyUI 图像或参考图 URL |
 | `VOD AIGC - 查询任务` | 按 TaskId 查状态（超时/失败排查用） |
 | `VOD AIGC - 下载视频` | 按 URL 重新下载视频 |
 | `VOD AIGC - 查看执行台账` | 显示 `output/vod_aigc/execution_history.jsonl` 中的历史记录（右下角浮窗） |

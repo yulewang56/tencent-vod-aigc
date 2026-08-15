@@ -2,6 +2,14 @@
 
 格式：[语义化版本](https://semver.org/lang/zh-CN/)，全部提交记录见 [GitHub Releases](https://github.com/yulewang56/tencent-vod-aigc/releases)。
 
+## [1.10.0] - 2026-08-15
+
+### 新增
+- **GPT-Image2 模型**（文档 3.14）：生图节点模型下拉新增 `OG image2_low / medium / high` 三档质量
+- **多图输出**：`OutputImageCount`（OG 支持 1-8，仅 >1 时传接口），多图时全部下载，
+  `image_url` / `image_path` 按行拼接输出
+- **输出格式**：`OutputFormat`（png / jpeg，留空跟随模型默认）；分辨率档位新增 1K / 2K
+
 ## [1.9.1] - 2026-08-15
 
 ### 修复
