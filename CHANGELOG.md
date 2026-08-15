@@ -2,6 +2,12 @@
 
 格式：[语义化版本](https://semver.org/lang/zh-CN/)，全部提交记录见 [GitHub Releases](https://github.com/yulewang56/tencent-vod-aigc/releases)。
 
+## [1.12.6] - 2026-08-16
+
+### 修复
+- 素材路径支持 `~` 波浪号展开（如 `~/Downloads/xxx.mp4`）——此前 `os.path.isfile` 不识别
+  shell 习惯写法导致"文件不存在"误报
+
 ## [1.12.5] - 2026-08-16
 
 ### 新增

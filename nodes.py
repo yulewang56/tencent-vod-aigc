@@ -283,9 +283,12 @@ def _image_tensor_to_base64(image_tensor, frame_index: int = 0) -> str:
 
 
 def _resolve_media_path(path: str) -> str:
-    """素材路径解析：绝对路径原样；input/、output/ 前缀解析到 ComfyUI 对应目录；其余按进程工作目录。"""
+    """素材路径解析：~ 展开 + 绝对路径原样；input/、output/ 前缀解析到 ComfyUI 对应目录；其余按进程工作目录。"""
     p = (path or "").strip()
-    if not p or os.path.isabs(p):
+    if not p:
+        return p
+    p = os.path.expanduser(p)  # 支持 ~/Downloads/xxx 这类 shell 习惯写法
+    if os.path.isabs(p):
         return p
     for prefix, getter in (("input/", folder_paths.get_input_directory),
                            ("output/", folder_paths.get_output_directory)):
@@ -297,7 +300,7 @@ def _resolve_media_path(path: str) -> str:
 def _file_to_base64(path: str, max_bytes: int, what: str) -> str:
     resolved = _resolve_media_path(path)
     if not os.path.isfile(resolved):
-        raise ValueError(f"文件不存在: {path}（可用绝对路径，或 input/xxx 相对路径）")
+        raise ValueError(f"文件不存在: {path}（支持 ~/、input/xxx、output/xxx 或绝对路径）")
     data = open(resolved, "rb").read()
     if len(data) > max_bytes:
         raise ValueError(f"{what} 超过 {max_bytes // (1024*1024)}MB 上限: {path}")

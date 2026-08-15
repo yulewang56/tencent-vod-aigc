@@ -571,3 +571,11 @@ try:
 except ValueError:
     check("url: mp4 as image rejected", True)
 check("url: audio ext pass", nodes._validate_media_url("https://x.com/s.wav", nodes._ALLOWED_AUDIO_EXTS, "参考音频") is None)
+
+# ---- 21. ~ 路径展开（v1.12.6）----
+expanded = nodes._resolve_media_path("~/Downloads/青海摇_480p.mp4")
+check("tilde: expands to home", expanded == os.path.join(os.path.expanduser("~"), "Downloads/青海摇_480p.mp4"), expanded)
+check("tilde: resolves to existing file", os.path.isfile(expanded))
+# 真实链路：~ 路径进 _file_to_base64 能加载
+b64_tilde = nodes._file_to_base64("~/Downloads/青海摇_480p.mp4", 50 * 1024 * 1024, "参考视频")
+check("tilde: loads via file_to_base64", len(b64_tilde) > 1000)
