@@ -808,9 +808,10 @@ class TencentVODAIGCImageTask:
                 raise ValueError(f"参考图最多 9 张，当前 {n} 张")
             for i in range(n):
                 data = _image_tensor_to_base64(ref_image, i)
-                file_infos.append({"Type": "Base64", "Category": "Image", "Base64": data})
+                # 生图 FileInfos 仅 Type + Base64/Url（与生视频不同，无 Category/Usage）
+                file_infos.append({"Type": "Base64", "Base64": data})
         for url in _parse_multiline(kwargs.get("ref_image_urls")):
-            file_infos.append({"Type": "Url", "Category": "Image", "Url": url})
+            file_infos.append({"Type": "Url", "Url": url})
 
         secret_id, secret_key, sub_app_id = _resolve_credentials(
             kwargs.get("secret_id"), kwargs.get("secret_key"), kwargs.get("sub_app_id"))

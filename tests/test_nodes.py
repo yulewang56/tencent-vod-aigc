@@ -380,7 +380,7 @@ check("t2i: payload t2i (no FileInfos)", img_payload == {
     "OutputConfig": {"StorageMode": "Temporary", "Resolution": "1080P", "AspectRatio": "16:9"}}, str(img_payload))
 img_payload2 = nodes._build_image_payload("1500044236", "p", "GEM 3.0",
                                           {"storage_mode": "Temporary", "resolution": "768P", "aspect_ratio": "1:1"},
-                                          file_infos=[{"Type": "Url", "Category": "Image", "Url": "https://x/a.png"}])
+                                          file_infos=[{"Type": "Url", "Url": "https://x/a.png"}])
 check("t2i: payload i2i (with FileInfos)", img_payload2["FileInfos"][0]["Url"] == "https://x/a.png"
       and img_payload2["ModelName"] == "GEM", str(img_payload2))
 
@@ -413,6 +413,7 @@ try:
     check("t2i: flow returns", tid == "1500044236-AigcImageTask-abc123t" and path == "/tmp/fake.png")
     fis = captured2["payload"]["FileInfos"]
     check("t2i: batch 3 frames -> 3 FileInfos", len(fis) == 3 and all(f["Type"] == "Base64" for f in fis), str(fis))
+    check("t2i: FileInfos has no Category (v1.9.1)", all("Category" not in f for f in fis), str(fis))
     check("t2i: no duration in OutputConfig", "Duration" not in captured2["payload"]["OutputConfig"])
 finally:
     nodes._call_api = orig_call2

@@ -2,6 +2,12 @@
 
 格式：[语义化版本](https://semver.org/lang/zh-CN/)，全部提交记录见 [GitHub Releases](https://github.com/yulewang56/tencent-vod-aigc/releases)。
 
+## [1.9.1] - 2026-08-15
+
+### 修复
+- 生图节点 FileInfos 移除 `Category` 字段（生图结构与生视频不同，仅 `Type` + `Base64`/`Url`），
+  修复 `UnknownParameter: FileInfos.0.Category is not recognized`
+
 ## [1.9.0] - 2026-08-15
 
 ### 新增
