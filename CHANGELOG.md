@@ -2,6 +2,13 @@
 
 格式：[语义化版本](https://semver.org/lang/zh-CN/)，全部提交记录见 [GitHub Releases](https://github.com/yulewang56/tencent-vod-aigc/releases)。
 
+## [1.12.5] - 2026-08-16
+
+### 新增
+- **URL 扩展名提交前校验**：参考视频仅允许 `.mp4` / `.mov`（服务端限制），图片 `.jpg/.jpeg/.png/.webp/.bmp`，
+  音频 `.mp3/.wav/.m4a/.aac`——明确不支持的格式（如 B 站 `.m4s` 分片）在提交前本地报错，
+  不再等任务跑完 22 秒才失败；无扩展名 URL 不拦截（交服务端判断）
+
 ## [1.12.4] - 2026-08-15
 
 ### 改进

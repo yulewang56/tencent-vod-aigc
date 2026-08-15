@@ -553,3 +553,21 @@ try:
     check("path: missing file raises", False)
 except ValueError as e:
     check("path: missing file raises", "input/xxx" in str(e))
+
+# ---- 20. URL 扩展名校验（v1.12.5）----
+nodes._validate_media_url("https://x.com/a.mp4", nodes._ALLOWED_VIDEO_EXTS, "参考视频")  # 不抛
+nodes._validate_media_url("https://x.com/a.mov?t=1", nodes._ALLOWED_VIDEO_EXTS, "参考视频")
+nodes._validate_media_url("https://x.com/noext", nodes._ALLOWED_VIDEO_EXTS, "参考视频")  # 无扩展名不拦
+check("url: mp4/mov/noext pass", True)
+try:
+    nodes._validate_media_url("https://x.com/a.m4s?e=1", nodes._ALLOWED_VIDEO_EXTS, "参考视频")
+    check("url: m4s rejected", False)
+except ValueError as e:
+    check("url: m4s rejected", ".m4s" in str(e) and ".mp4" in str(e), str(e))
+check("url: image ext pass", nodes._validate_media_url("https://x.com/a.png", nodes._ALLOWED_IMAGE_EXTS, "参考图") is None)
+try:
+    nodes._validate_media_url("https://x.com/a.mp4", nodes._ALLOWED_IMAGE_EXTS, "参考图")
+    check("url: mp4 as image rejected", False)
+except ValueError:
+    check("url: mp4 as image rejected", True)
+check("url: audio ext pass", nodes._validate_media_url("https://x.com/s.wav", nodes._ALLOWED_AUDIO_EXTS, "参考音频") is None)

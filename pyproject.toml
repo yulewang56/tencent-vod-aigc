@@ -1,7 +1,7 @@
 [project]
 name = "tencent-vod-aigc"
 description = "ComfyUI custom nodes for Tencent Cloud VOD AIGC (MiniMax Hailuo H3 video generation) — pure stdlib, no extra pip dependencies"
-version = "1.12.4"
+version = "1.12.5"
 license = { file = "LICENSE" }
 dependencies = []
 

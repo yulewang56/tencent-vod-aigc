@@ -304,6 +304,22 @@ def _file_to_base64(path: str, max_bytes: int, what: str) -> str:
     return base64.b64encode(data).decode("ascii")
 
 
+_ALLOWED_VIDEO_EXTS = (".mp4", ".mov")
+_ALLOWED_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
+_ALLOWED_AUDIO_EXTS = (".mp3", ".wav", ".m4a", ".aac")
+
+
+def _validate_media_url(url: str, allowed: tuple, what: str):
+    """提交前校验素材 URL 扩展名：明确不在允许列表时本地报错（避免任务跑完才失败）。
+
+    无扩展名/无法解析的 URL 不拦截（交由服务端判断）。
+    """
+    path = urllib.parse.urlparse(url.strip()).path
+    ext = os.path.splitext(path)[1].lower()
+    if ext and ext not in allowed:
+        raise ValueError(f"{what} 扩展名 \"{ext}\" 不支持，允许: {', '.join(allowed)}（URL: {url[:80]}）")
+
+
 def _parse_multiline(text):
     """多行 STRING 输入 → 去空行列表。"""
     if not text:
@@ -730,6 +746,7 @@ class TencentVODH3ImageToVideo:
                     raise ValueError("Base64 素材总大小超过 70MB 上限")
                 file_infos.append({"Type": "Base64", "Category": "Image", "Base64": data, "Usage": usage})
             elif url:
+                _validate_media_url(url, _ALLOWED_IMAGE_EXTS, f"{usage}图")
                 file_infos.append({"Type": "Url", "Category": "Image", "Url": url, "Usage": usage})
 
         if not file_infos:
@@ -803,6 +820,7 @@ class TencentVODH3ReferenceToVideo:
 
         # 参考图：URL
         for url in _parse_multiline(kwargs.get("ref_image_urls")):
+            _validate_media_url(url, _ALLOWED_IMAGE_EXTS, "参考图")
             file_infos.append({"Type": "Url", "Category": "Image", "Url": url, "Usage": "Reference"})
 
         # 参考视频
@@ -811,6 +829,7 @@ class TencentVODH3ReferenceToVideo:
             base64_total += len(data)
             file_infos.append({"Type": "Base64", "Category": "Video", "Base64": data, "Usage": "Reference"})
         for url in _parse_multiline(kwargs.get("ref_video_urls")):
+            _validate_media_url(url, _ALLOWED_VIDEO_EXTS, "参考视频")
             file_infos.append({"Type": "Url", "Category": "Video", "Url": url, "Usage": "Reference"})
 
         # 参考音频
@@ -819,6 +838,7 @@ class TencentVODH3ReferenceToVideo:
             base64_total += len(data)
             file_infos.append({"Type": "Base64", "Category": "Audio", "Base64": data, "Usage": "Reference"})
         for url in _parse_multiline(kwargs.get("ref_audio_urls")):
+            _validate_media_url(url, _ALLOWED_AUDIO_EXTS, "参考音频")
             file_infos.append({"Type": "Url", "Category": "Audio", "Url": url, "Usage": "Reference"})
 
         if not file_infos:
@@ -923,6 +943,7 @@ class TencentVODAIGCImageTask:
                 # 生图 FileInfos 仅 Type + Base64/Url（与生视频不同，无 Category/Usage）
                 file_infos.append({"Type": "Base64", "Base64": data})
         for url in _parse_multiline(kwargs.get("ref_image_urls")):
+            _validate_media_url(url, _ALLOWED_IMAGE_EXTS, "参考图")
             file_infos.append({"Type": "Url", "Url": url})
 
         secret_id, secret_key, sub_app_id = _resolve_credentials(
