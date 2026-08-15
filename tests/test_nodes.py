@@ -321,7 +321,8 @@ p = nodes._save_config_file("AKIDsave", "sk-save", "1500044236", path=os.path.jo
 check("creds-save: writes file", os.path.isfile(p))
 saved = json.load(open(p))
 check("creds-save: round-trip", saved == {"secret_id": "AKIDsave", "secret_key": "sk-save",
-                                          "sub_app_id": "1500044236", "prices": {}}, str(saved))
+                                          "sub_app_id": "1500044236", "prices": {},
+                                          "image_prices": {}}, str(saved))
 try:
     nodes._save_config_file("", "sk", "1500044236", path=os.path.join(tmpdir, "x.json"))
     check("creds-save: empty rejects", False)
@@ -481,3 +482,39 @@ try:
 finally:
     nodes._call_api = orig_call3
     nodes._download_video = orig_dl3
+
+# ---- 17. 生图计费（v1.11.0）----
+import tempfile as _tf2
+_tmp2 = _tf2.mkdtemp()
+# 17.1 配置读取 image_prices
+open(os.path.join(_tmp2, "tencent-vod-config.json"), "w").write(json.dumps({
+    "secret_id": "AKIDp", "secret_key": "sk-p", "sub_app_id": "1500044236",
+    "image_prices": {"Jimeng 4.0": 0.1, "OG image2_medium": "0.25"}}))
+cfg17 = nodes._load_config_file(_tmp2)
+check("img-price: config loads", cfg17["image_prices"] == {"Jimeng 4.0": 0.1, "OG image2_medium": 0.25}, str(cfg17))
+# 17.2 单价解析
+nodes._load_config_file = lambda: {"secret_id": "x", "secret_key": "y", "sub_app_id": "1",
+                                   "prices": {}, "image_prices": {"Jimeng 4.0": 0.1, "OG image2_medium": 0.25}}
+check("img-price: per-model", nodes._image_price_for("Jimeng 4.0") == 0.1)
+check("img-price: quality tier differs", nodes._image_price_for("OG image2_medium") == 0.25)
+check("img-price: unknown -> 0", nodes._image_price_for("OG image2_high") == 0.0)
+# 17.3 台账记录：model/image_count + 费用 = 张数 × 单价
+rec17 = nodes._base_record("t2i", "猫", {"model": "OG image2_medium", "output_image_count": 3,
+                                         "resolution": "1K"})
+check("img-price: record fields", rec17["model"] == "OG image2_medium" and rec17["image_count"] == 3)
+check("img-price: cost = count x price", rec17["estimated_cost"] == 0.75, str(rec17["estimated_cost"]))
+rec17b = nodes._base_record("t2v", "视频", {"resolution": "1080P", "duration": 5})
+check("img-price: video record no model", rec17b["model"] == "" and rec17b["image_count"] == 0)
+nodes._load_config_file = _orig_cfg
+# 17.4 保存合并 image_prices
+p17 = nodes._save_config_file("AKIDs", "sk", "1500044236", image_prices={"GEM 3.0": 0.2},
+                              path=os.path.join(_tmp2, "tencent-vod-config.json"))
+saved17 = json.load(open(p17))
+check("img-price: save merges", saved17["image_prices"] == {"Jimeng 4.0": 0.1, "OG image2_medium": 0.25, "GEM 3.0": 0.2},
+      str(saved17["image_prices"]))
+try:
+    nodes._save_config_file("AKIDa", "sk", "1500044236", image_prices={"OG image2_low": "abc"},
+                            path=os.path.join(_tmp2, "x.json"))
+    check("img-price: bad price raises", False)
+except ValueError as e:
+    check("img-price: bad price raises", "生图单价" in str(e))

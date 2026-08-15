@@ -2,6 +2,14 @@
 
 格式：[语义化版本](https://semver.org/lang/zh-CN/)，全部提交记录见 [GitHub Releases](https://github.com/yulewang56/tencent-vod-aigc/releases)。
 
+## [1.11.0] - 2026-08-15
+
+### 新增
+- **生图计费预估**：配置文件新增 `image_prices`（元/张，按模型区分——不同模型对应不同计费项，
+  如即梦→SI、OG→GPT-Image2）；台账生图记录新增 `model` / `image_count` 字段，
+  费用 = 张数 × 模型单价；查看器显示「≈¥X.XX/N张」
+- 首次使用弹窗新增**可折叠**的「生图单价」区块（5 个模型输入，选填，预填并随配置保存）
+
 ## [1.10.0] - 2026-08-15
 
 ### 新增

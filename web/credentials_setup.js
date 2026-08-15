@@ -14,7 +14,7 @@ app.registerExtension({
     try {
       const resp = await fetch("/tencent-vod-aigc/config");
       const data = await resp.json();
-      if (!data.configured) showSetupModal(data.prices || {});
+      if (!data.configured) showSetupModal(data.prices || {}, data.image_prices || {});
     } catch (e) {
       /* 接口不可用时静默跳过，不影响节点使用 */
     }
@@ -23,7 +23,7 @@ app.registerExtension({
 
 let prompted = false; // 每个会话只弹一次，避免打扰
 
-function showSetupModal(existingPrices) {
+function showSetupModal(existingPrices, existingImagePrices) {
   if (prompted) return;
   prompted = true;
 
@@ -72,7 +72,7 @@ function showSetupModal(existingPrices) {
   const subAppId = input("text", "SubAppId（纯数字）");
 
   const section = document.createElement("div");
-  section.textContent = "单价（元/秒）(optional) —— 用于台账费用预估";
+  section.textContent = "视频单价（元/秒）(optional) —— 用于台账费用预估";
   section.style.cssText = "margin:14px 0 2px;color:#a8a8b0;font-size:12px";
 
   const RES = ["768P", "1080P", "2K", "4K"];
@@ -90,6 +90,31 @@ function showSetupModal(existingPrices) {
     priceInputs[res] = field;
     row.append(lab, field);
     section.appendChild(row);
+  }
+
+  // 生图单价（可折叠）：不同模型对应不同计费项（如 即梦→SI、OG→GPT-Image2）
+  const imgSection = document.createElement("details");
+  imgSection.style.cssText = "margin-top:12px";
+  const imgSummary = document.createElement("summary");
+  imgSummary.textContent = "生图单价（元/张）(optional) —— 按模型，用于台账费用预估";
+  imgSummary.style.cssText = "cursor:pointer;color:#a8a8b0;font-size:12px";
+  imgSection.appendChild(imgSummary);
+
+  const IMG_MODELS = ["Jimeng 4.0", "GEM 3.0", "OG image2_low", "OG image2_medium", "OG image2_high"];
+  const imgPriceInputs = {};
+  for (const model of IMG_MODELS) {
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;align-items:center;gap:8px;margin-top:4px";
+    const lab = document.createElement("div");
+    lab.textContent = model;
+    lab.style.cssText = "width:150px;color:#c8c8d0;flex-shrink:0;font-size:12px";
+    const field = input("number", "0.1");
+    field.step = "0.01";
+    field.min = "0";
+    if (existingImagePrices && existingImagePrices[model] != null) field.value = String(existingImagePrices[model]);
+    imgPriceInputs[model] = field;
+    row.append(lab, field);
+    imgSection.appendChild(row);
   }
 
   const errorLine = document.createElement("div");
@@ -120,6 +145,11 @@ function showSetupModal(existingPrices) {
       const v = priceInputs[res].value.trim();
       if (v !== "") prices[res] = v;
     }
+    const imagePrices = {};
+    for (const model of IMG_MODELS) {
+      const v = imgPriceInputs[model].value.trim();
+      if (v !== "") imagePrices[model] = v;
+    }
     try {
       const resp = await fetch("/tencent-vod-aigc/config", {
         method: "POST",
@@ -129,6 +159,7 @@ function showSetupModal(existingPrices) {
           secret_key: secretKey.value.trim(),
           sub_app_id: subAppId.value.trim(),
           prices,
+          image_prices: imagePrices,
         }),
       });
       const data = await resp.json();
@@ -154,7 +185,7 @@ function showSetupModal(existingPrices) {
   laterBtn.addEventListener("click", () => overlay.remove());
 
   box.append(title, desc, label("SecretId", true), secretId, label("SecretKey", true), secretKey,
-    label("SubAppId", true), subAppId, section, errorLine, buttons);
+    label("SubAppId", true), subAppId, section, imgSection, errorLine, buttons);
   buttons.append(saveBtn, laterBtn);
   overlay.appendChild(box);
   document.body.appendChild(overlay);

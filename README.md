@@ -60,7 +60,9 @@ cp tencent-vod-config.example.json tencent-vod-config.json
   "secret_id": "AKIDxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
   "secret_key": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
   "sub_app_id": "1500000000",
-  "prices": { "768P": 0.1, "1080P": 0.2, "2K": 0.3, "4K": 0.5 }
+  "prices": { "768P": 0.1, "1080P": 0.2, "2K": 0.3, "4K": 0.5 },
+  "image_prices": { "Jimeng 4.0": 0.1, "GEM 3.0": 0.1,
+                    "OG image2_low": 0.05, "OG image2_medium": 0.1, "OG image2_high": 0.2 }
 }
 ```
 
@@ -76,9 +78,11 @@ cp tencent-vod-config.example.json tencent-vod-config.json
 | SecretId | `secret_id` |
 | SecretKey | `secret_key` |
 | SubAppId | `sub_app_id` |
-| 单价（元/秒） | `prices.768P / 1080P / 2K / 4K` |
+| 视频单价（元/秒） | `prices.768P / 1080P / 2K / 4K` |
+| 生图单价（元/张） | `image_prices.<模型全名>`（Jimeng 4.0 / GEM 3.0 / OG image2_*） |
 
-单价用于台账**费用预估**（不足 5 秒按 5 秒计费），示例值 `0.1/0.2/0.3/0.5` 不是真实价格——
+单价用于台账**费用预估**：视频按秒（不足 5 秒按 5 秒），生图按张（张数 × 模型单价）。
+示例值不是真实价格——不同模型对应不同计费项（即梦→SI、OG→GPT-Image2 等），
 请按《AIGC价格指南（客户）》填写；未配置时显示「¥未配置单价」。配置入口只有两处：节点输入框与配置文件。
 
 ## 参数说明（对应文档 3.17）
@@ -124,7 +128,7 @@ VideoHelperSuite / 其他视频节点 → 后处理
 ## 测试
 
 ```bash
-python tests/test_nodes.py        # 90 项自包含测试，无需安装任何依赖（自带 ComfyUI/numpy/PIL stub）
+python tests/test_nodes.py        # 99 项自包含测试，无需安装任何依赖（自带 ComfyUI/numpy/PIL stub）
 ```
 
 ## 更新日志

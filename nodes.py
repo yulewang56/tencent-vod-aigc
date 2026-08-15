@@ -156,6 +156,14 @@ def _load_config_file(dir_path=None):
                 result["prices"][k] = float(v)
             except (TypeError, ValueError):
                 pass
+    result["image_prices"] = {}
+    img_prices = data.get("image_prices")
+    if isinstance(img_prices, dict):
+        for k, v in img_prices.items():
+            try:
+                result["image_prices"][k] = float(v)
+            except (TypeError, ValueError):
+                pass
     return result
 
 
@@ -182,8 +190,11 @@ def _credentials_configured() -> bool:
     return bool(file_creds.get("secret_id") and file_creds.get("secret_key") and file_creds.get("sub_app_id"))
 
 
-def _save_config_file(secret_id, secret_key, sub_app_id, prices=None, path=None) -> str:
-    """校验并写入统一配置文件（凭据必填；单价选填，仅合并非空数值项），返回文件路径。"""
+def _save_config_file(secret_id, secret_key, sub_app_id, prices=None, image_prices=None, path=None) -> str:
+    """校验并写入统一配置文件（凭据必填；单价选填，仅合并非空数值项），返回文件路径。
+
+    prices = 视频单价（元/秒，按分辨率）；image_prices = 生图单价（元/张，按模型）。
+    """
     sid, skey, sub = (secret_id or "").strip(), (secret_key or "").strip(), (sub_app_id or "").strip()
     if not sid or not skey:
         raise ValueError("SecretId 与 SecretKey 不能为空")
@@ -191,6 +202,7 @@ def _save_config_file(secret_id, secret_key, sub_app_id, prices=None, path=None)
         raise ValueError(f"SubAppId 必须为纯数字，当前值: {sub}")
     path = path or os.path.join(os.path.dirname(os.path.abspath(__file__)), _CONFIG_FILE)
     existing = _load_config_file(os.path.dirname(path)) if os.path.exists(path) else {}
+
     merged = dict(existing.get("prices", {}))
     for res, val in (prices or {}).items():
         if val is None or val == "":
@@ -198,9 +210,20 @@ def _save_config_file(secret_id, secret_key, sub_app_id, prices=None, path=None)
         try:
             merged[str(res)] = float(val)
         except (TypeError, ValueError):
-            raise ValueError(f"单价 {res} 必须是数字，当前值: {val}")
+            raise ValueError(f"视频单价 {res} 必须是数字，当前值: {val}")
+
+    merged_img = dict(existing.get("image_prices", {}))
+    for model, val in (image_prices or {}).items():
+        if val is None or val == "":
+            continue
+        try:
+            merged_img[str(model)] = float(val)
+        except (TypeError, ValueError):
+            raise ValueError(f"生图单价 {model} 必须是数字，当前值: {val}")
+
     with open(path, "w", encoding="utf-8") as f:
-        json.dump({"secret_id": sid, "secret_key": skey, "sub_app_id": sub, "prices": merged},
+        json.dump({"secret_id": sid, "secret_key": skey, "sub_app_id": sub,
+                   "prices": merged, "image_prices": merged_img},
                   f, indent=2, ensure_ascii=False)
     return path
 
@@ -217,7 +240,8 @@ def _register_http_routes():
     async def config_status(_request):
         cfg = _load_config_file()
         return web.json_response({"configured": _credentials_configured(),
-                                  "prices": cfg.get("prices", {})})
+                                  "prices": cfg.get("prices", {}),
+                                  "image_prices": cfg.get("image_prices", {})})
 
     async def config_save(request):
         try:
@@ -226,7 +250,8 @@ def _register_http_routes():
             return web.json_response({"ok": False, "error": "请求体不是合法 JSON"}, status=400)
         try:
             path = _save_config_file(body.get("secret_id", ""), body.get("secret_key", ""),
-                                     body.get("sub_app_id", ""), body.get("prices"))
+                                     body.get("sub_app_id", ""), body.get("prices"),
+                                     body.get("image_prices"))
         except ValueError as e:
             return web.json_response({"ok": False, "error": str(e)}, status=400)
         return web.json_response({"ok": True, "path": path})
@@ -406,6 +431,17 @@ def _estimate_cost(resolution: str, duration: int) -> tuple:
     return seconds_billed, round(seconds_billed * _price_for(resolution), 4)
 
 
+def _image_price_for(model: str) -> float:
+    """生图单价（元/张）：tencent-vod-config.json image_prices，按模型区分，未配置返回 0。
+
+    不同模型对应不同计费项（如即梦→SI、OG→GPT-Image2 计费），键为模型下拉全名。
+    """
+    try:
+        return float(_load_config_file().get("image_prices", {}).get(model or "", 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _view_url_for(path: str) -> str:
     """把输出目录下的文件转成 ComfyUI /view 链接（浏览器可直接播放）。"""
     try:
@@ -417,10 +453,16 @@ def _view_url_for(path: str) -> str:
 
 
 def _base_record(mode: str, prompt: str, kwargs: dict, task_id="", url="", path="", error=""):
-    """构造台账记录：含计费要素（时长/分辨率/音频/存储方式），便于成本审计。"""
-    if mode in ("t2i", "i2i"):  # 生图按张计费，秒数/费用留 0
-        seconds_billed, estimated_cost = 0, 0.0
+    """构造台账记录：含计费要素（时长/分辨率/模型/张数），便于成本审计。
+
+    视频按秒计费（元/秒 × 计费秒数）；生图按张计费（元/张 × 张数，按模型）。
+    """
+    if mode in ("t2i", "i2i"):
+        model = kwargs.get("model") or ""
+        image_count = int(kwargs.get("output_image_count") or 1)
+        seconds_billed, estimated_cost = 0, round(image_count * _image_price_for(model), 4)
     else:
+        model, image_count = "", 0
         seconds_billed, estimated_cost = _estimate_cost(kwargs.get("resolution") or "",
                                                         kwargs.get("duration") or 0)
     return {
@@ -434,6 +476,8 @@ def _base_record(mode: str, prompt: str, kwargs: dict, task_id="", url="", path=
         "audio_generation": kwargs.get("audio_generation") or "",
         "storage_mode": kwargs.get("storage_mode") or "",
         "enhance_prompt": kwargs.get("enhance_prompt") or "",
+        "model": model,
+        "image_count": image_count,
         "video_url": url,
         "video_path": path,
         "view_url": _view_url_for(path) if path else "",
@@ -961,7 +1005,11 @@ class TencentVODAIGCViewHistory:
                 asset = os.path.basename(r.get("video_path") or r.get("video_url") or "")
                 cost = r.get("estimated_cost") or 0
                 billed = r.get("seconds_billed") or 0
-                cost_txt = f"≈¥{cost:.2f}/{billed}s" if cost > 0 else "¥未配置单价"
+                if r.get("mode") in ("t2i", "i2i"):
+                    img_n = r.get("image_count") or 1
+                    cost_txt = f"≈¥{cost:.2f}/{img_n}张" if cost > 0 else "¥未配置单价"
+                else:
+                    cost_txt = f"≈¥{cost:.2f}/{billed}s" if cost > 0 else "¥未配置单价"
                 url_or_asset = r.get("video_url") or asset
                 view = r.get("view_url") or ""
                 lines.append(

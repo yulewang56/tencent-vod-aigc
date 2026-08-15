@@ -7,5 +7,12 @@
     "1080P": 0.2,
     "2K": 0.3,
     "4K": 0.5
+  },
+  "image_prices": {
+    "Jimeng 4.0": 0.1,
+    "GEM 3.0": 0.1,
+    "OG image2_low": 0.05,
+    "OG image2_medium": 0.1,
+    "OG image2_high": 0.2
   }
 }
