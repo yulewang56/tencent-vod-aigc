@@ -698,7 +698,7 @@ class TencentVODH3ImageToVideo:
         optional.update(_output_config_inputs())
         optional["first_frame"] = ("IMAGE", {"tooltip": "首帧图（ComfyUI 图像，转 Base64 上传）"})
         optional["last_frame"] = ("IMAGE", {"tooltip": "尾帧图"})
-        optional["first_frame_url"] = ("STRING", {"default": "", "tooltip": "首帧图 URL（可访问的公网地址，与 first_frame 二选一）"})
+        optional["first_frame_url"] = ("STRING", {"default": "", "tooltip": "首帧图 URL（可匿名下载的图片直链，与 first_frame 二选一）"})
         optional["last_frame_url"] = ("STRING", {"default": "", "tooltip": "尾帧图 URL"})
         return {"required": required, "optional": optional}
 
@@ -766,11 +766,11 @@ class TencentVODH3ReferenceToVideo:
         optional = dict(_cred_inputs())          # 凭据选填：留空读 tencent-vod-config.json
         optional.update(_output_config_inputs())
         optional["ref_images"] = ("IMAGE", {"tooltip": "参考图，支持批量（batch）：多张图请先合成 batch（如 Load Images / ImageBatch 节点），每帧一张，最多 9 张；也可用 ref_image_urls 传多个 URL"})
-        optional["ref_image_urls"] = ("STRING", {"multiline": True, "default": "", "tooltip": "参考图 URL，每行一个，最多 9 个"})
+        optional["ref_image_urls"] = ("STRING", {"multiline": True, "default": "", "tooltip": "参考图 URL，每行一个，最多 9 个。必须为可匿名下载的图片直链（.jpg/.png 等），不支持网页地址"})
         optional["ref_video_paths"] = ("STRING", {"multiline": True, "default": "", "tooltip": "本地参考视频路径，每行一个（2-15 秒/段，最多 3 段，共 ≤15 秒）"})
-        optional["ref_video_urls"] = ("STRING", {"multiline": True, "default": "", "tooltip": "参考视频 URL，每行一个"})
+        optional["ref_video_urls"] = ("STRING", {"multiline": True, "default": "", "tooltip": "参考视频 URL，每行一个。必须为可匿名下载的视频直链（.mp4/.mov 等），不支持网页地址（如 B 站/抖音页面）；网页视频请先下载到本地用 ref_video_paths"})
         optional["ref_audio_paths"] = ("STRING", {"multiline": True, "default": "", "tooltip": "本地参考音频路径，每行一个（2-15 秒/段，最多 3 段，不能单独输入）"})
-        optional["ref_audio_urls"] = ("STRING", {"multiline": True, "default": "", "tooltip": "参考音频 URL，每行一个"})
+        optional["ref_audio_urls"] = ("STRING", {"multiline": True, "default": "", "tooltip": "参考音频 URL，每行一个。必须为可匿名下载的音频直链（.mp3/.wav 等），不支持网页地址"})
         return {"required": required, "optional": optional}
 
     RETURN_TYPES = ("STRING", "STRING", "STRING")
@@ -885,7 +885,7 @@ class TencentVODAIGCImageTask:
             "filename": ("STRING", {"default": "", "tooltip": "可选，本地保存文件名（不含扩展名，留空自动命名；多图自动加序号）"}),
             "ref_image": ("IMAGE", {"tooltip": "参考图（图生图）。多张请先合成 batch，每帧一张，最多 9 张；或用 ref_image_urls"}),
             "ref_image_urls": ("STRING", {"multiline": True, "default": "",
-                                          "tooltip": "参考图 URL（图生图），每行一个，最多 9 个"}),
+                                          "tooltip": "参考图 URL（图生图），每行一个，最多 9 个。必须为可匿名下载的图片直链，不支持网页地址"}),
             "resolution": (["768P", "1080P", "1K", "2K"], {"default": "1080P",
                                                              "tooltip": "按模型支持选择（OG 常用 1K/2K）"}),
             "aspect_ratio": (ASPECT_RATIOS, {"default": "16:9"}),

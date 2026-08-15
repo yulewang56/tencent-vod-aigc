@@ -2,6 +2,13 @@
 
 格式：[语义化版本](https://semver.org/lang/zh-CN/)，全部提交记录见 [GitHub Releases](https://github.com/yulewang56/tencent-vod-aigc/releases)。
 
+## [1.12.4] - 2026-08-15
+
+### 改进
+- URL 类素材参数（ref_*_urls / first_frame_url 等）tooltip 明确"必须为可匿名下载的直链
+  （.mp4/.jpg 等），不支持网页地址"——修复 B 站/抖音等页面 URL 导致的
+  `media download failed (HTTP 412)`（网页地址返回 HTML，腾讯云下载器拿不到视频文件）
+
 ## [1.12.3] - 2026-08-15
 
 ### 新增
