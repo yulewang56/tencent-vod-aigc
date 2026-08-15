@@ -2,6 +2,15 @@
 
 格式：[语义化版本](https://semver.org/lang/zh-CN/)，全部提交记录见 [GitHub Releases](https://github.com/yulewang56/tencent-vod-aigc/releases)。
 
+## [1.12.1] - 2026-08-15
+
+### 修复
+- **图片节点预览协议**：改用 SaveImage 同款 `{"ui": {"images": [...]}, "result": (...)}` 返回——
+  裸张量不会触发服务端预览；节点上现在直接显示生成图（`preview_image` 张量同时保留，可接下游）
+- **凭据输入移入 optional**：4 个生成节点 + 查询节点的凭据字段从 required 移到 optional
+  （与 `(optional)` 显示名一致），API 调用可完全省略凭据、纯走配置文件
+- 台账装饰器保留字典返回的 ui 部分；路由注册防御 ComfyUI 进程外导入
+
 ## [1.12.0] - 2026-08-15
 
 ### 新增

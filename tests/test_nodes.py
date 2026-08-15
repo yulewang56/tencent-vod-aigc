@@ -406,12 +406,13 @@ orig_call2 = nodes._call_api
 nodes._call_api = fake_img_call
 try:
     node_obj = nodes.TencentVODAIGCImageTask()
-    tid, url, path, preview = node_obj.generate("一只猫在窗边", secret_id="AKIDx", secret_key="sk",
+    res = node_obj.generate("一只猫在窗边", secret_id="AKIDx", secret_key="sk",
                                        sub_app_id="1500044236", ref_image=FakeTensor(),
                                        model="Jimeng 4.0", storage_mode="Temporary",
                                        resolution="1080P", aspect_ratio="16:9",
                                        poll_interval=3, timeout=60)
-    check("t2i: flow returns", tid == "1500044236-AigcImageTask-abc123t" and path == "/tmp/fake.png")
+    check("t2i: flow returns", res["result"][0] == "1500044236-AigcImageTask-abc123t" and res["result"][2] == "/tmp/fake.png")
+    check("t2i: ui images present", res["ui"]["images"][0]["filename"] == "fake.png", str(res))
     fis = captured2["payload"]["FileInfos"]
     check("t2i: batch 3 frames -> 3 FileInfos", len(fis) == 3 and all(f["Type"] == "Base64" for f in fis), str(fis))
     check("t2i: FileInfos has no Category (v1.9.1)", all("Category" not in f for f in fis), str(fis))
@@ -472,13 +473,15 @@ orig_call3 = nodes._call_api
 nodes._call_api = fake_img_call3
 try:
     node_obj = nodes.TencentVODAIGCImageTask()
-    tid, url_out, path_out, preview3 = node_obj.generate("p", secret_id="AKIDx", secret_key="sk",
+    res3 = node_obj.generate("p", secret_id="AKIDx", secret_key="sk",
                                                sub_app_id="1500044236", model="OG image2_medium",
                                                storage_mode="Temporary", resolution="1K",
                                                aspect_ratio="9:16", output_image_count=3,
                                                poll_interval=3, timeout=60)
     check("og: 3 urls downloaded", len(dl_calls) == 3, str(dl_calls))
+    tid, url_out, path_out, preview3 = res3["result"]
     check("og: outputs joined by newline", url_out.count("\n") == 2 and path_out.count("\n") == 2, repr(url_out))
+    check("og: ui images for 3 files", len(res3["ui"]["images"]) == 3, str(res3))
 finally:
     nodes._call_api = orig_call3
     nodes._download_video = orig_dl3

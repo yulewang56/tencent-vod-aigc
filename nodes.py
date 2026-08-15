@@ -233,9 +233,9 @@ def _register_http_routes():
     try:
         from aiohttp import web
         from server import PromptServer
+        routes = PromptServer.instance.routes  # ComfyUI 进程外导入（如脚本）时 instance 不存在
     except Exception:
         return
-    routes = PromptServer.instance.routes
 
     async def config_status(_request):
         cfg = _load_config_file()
@@ -531,10 +531,11 @@ def _ledger(mode):
             m = mode or ("i2i" if (kwargs.get("ref_image") is not None
                                    or (kwargs.get("ref_image_urls") or "").strip()) else "t2i")
             try:
-                result = fn(self, prompt, **kwargs)  # 3 元组（视频）或 4 元组（生图含 preview_image）
+                original = fn(self, prompt, **kwargs)  # 元组，或 {"ui": ..., "result": ...} 字典（生图预览）
+                result = original.get("result") if isinstance(original, dict) else original
                 task_id, url, path = result[0], result[1], result[2]
                 _append_history(_base_record(m, prompt, kwargs, task_id, url, path))
-                return result
+                return original  # 字典返回需原样保留 ui（预览协议）
             except Exception as e:
                 _append_history(_base_record(m, prompt, kwargs,
                                              task_id=getattr(e, "task_id", ""), error=str(e)))
@@ -633,9 +634,10 @@ class TencentVODH3TextToVideo:
 
     @classmethod
     def INPUT_TYPES(cls):
-        required = dict(_cred_inputs())
-        required["prompt"] = ("STRING", {"multiline": True, "default": "", "tooltip": "提示词，上限 7000 字符"})
-        return {"required": required, "optional": _output_config_inputs()}
+        required = {"prompt": ("STRING", {"multiline": True, "default": "", "tooltip": "提示词，上限 7000 字符"})}
+        optional = dict(_cred_inputs())          # 凭据选填：留空读 tencent-vod-config.json
+        optional.update(_output_config_inputs())
+        return {"required": required, "optional": optional}
 
     RETURN_TYPES = ("STRING", "STRING", "STRING")
     RETURN_NAMES = ("task_id", "video_url", "video_path")
@@ -677,9 +679,9 @@ class TencentVODH3ImageToVideo:
 
     @classmethod
     def INPUT_TYPES(cls):
-        required = dict(_cred_inputs())
-        required["prompt"] = ("STRING", {"multiline": True, "default": "", "tooltip": "提示词，上限 7000 字符"})
-        optional = _output_config_inputs()
+        required = {"prompt": ("STRING", {"multiline": True, "default": "", "tooltip": "提示词，上限 7000 字符"})}
+        optional = dict(_cred_inputs())          # 凭据选填：留空读 tencent-vod-config.json
+        optional.update(_output_config_inputs())
         optional["first_frame"] = ("IMAGE", {"tooltip": "首帧图（ComfyUI 图像，转 Base64 上传）"})
         optional["last_frame"] = ("IMAGE", {"tooltip": "尾帧图"})
         optional["first_frame_url"] = ("STRING", {"default": "", "tooltip": "首帧图 URL（可访问的公网地址，与 first_frame 二选一）"})
@@ -746,9 +748,9 @@ class TencentVODH3ReferenceToVideo:
 
     @classmethod
     def INPUT_TYPES(cls):
-        required = dict(_cred_inputs())
-        required["prompt"] = ("STRING", {"multiline": True, "default": "", "tooltip": "提示词；多图时可用「图1…图2…」描述"})
-        optional = _output_config_inputs()
+        required = {"prompt": ("STRING", {"multiline": True, "default": "", "tooltip": "提示词；多图时可用「图1…图2…」描述"})}
+        optional = dict(_cred_inputs())          # 凭据选填：留空读 tencent-vod-config.json
+        optional.update(_output_config_inputs())
         optional["ref_images"] = ("IMAGE", {"tooltip": "参考图，支持批量（batch）：多张图请先合成 batch（如 Load Images / ImageBatch 节点），每帧一张，最多 9 张；也可用 ref_image_urls 传多个 URL"})
         optional["ref_image_urls"] = ("STRING", {"multiline": True, "default": "", "tooltip": "参考图 URL，每行一个，最多 9 个"})
         optional["ref_video_paths"] = ("STRING", {"multiline": True, "default": "", "tooltip": "本地参考视频路径，每行一个（2-15 秒/段，最多 3 段，共 ≤15 秒）"})
@@ -855,10 +857,10 @@ class TencentVODAIGCImageTask:
 
     @classmethod
     def INPUT_TYPES(cls):
-        required = dict(_cred_inputs())
-        required["prompt"] = ("STRING", {"multiline": True, "default": "",
-                                         "tooltip": "提示词；图生图时描述参考图中的主体"})
-        optional = {
+        required = {"prompt": ("STRING", {"multiline": True, "default": "",
+                                           "tooltip": "提示词；图生图时描述参考图中的主体"})}
+        optional = dict(_cred_inputs())          # 凭据选填：留空读 tencent-vod-config.json
+        optional.update({
             "model": (["Jimeng 4.0", "GEM 3.0", "OG image2_low", "OG image2_medium", "OG image2_high"],
                      {"default": "Jimeng 4.0",
                       "tooltip": "生图模型：Jimeng/GEM（3.3.2 示例）；OG = GPT-Image2（3.14 指南），low/medium/high 为质量档位"}),
@@ -878,7 +880,7 @@ class TencentVODAIGCImageTask:
             "endpoint": ("STRING", {"default": ""}),
             "poll_interval": ("INT", {"default": 10, "min": 3, "max": 120, "step": 1}),
             "timeout": ("INT", {"default": 600, "min": 60, "max": 7200, "step": 60}),
-        }
+        })
         return {"required": required, "optional": optional}
 
     RETURN_TYPES = ("STRING", "STRING", "STRING", "IMAGE")
@@ -930,8 +932,13 @@ class TencentVODAIGCImageTask:
         paths = [_download_video(u, task_id, on_progress=lambda t: _set_status(self, t),
                                  name_hint=kwargs.get("filename")) for u in urls]
         _set_status(self, "完成")
-        # preview_image：本地图片 → IMAGE 张量（原生预览 + 可接下游）；失败返回 None 不阻塞
-        return (task_id, "\n".join(urls), "\n".join(paths), _paths_to_image_tensor(paths))
+        # preview_image：本地图片 → IMAGE 张量（可接下游）；失败返回 None 不阻塞
+        # ui.images：SaveImage 同款预览协议，让节点上直接显示生成图
+        tensor = _paths_to_image_tensor(paths)
+        ui_images = [{"filename": os.path.basename(p), "subfolder": "vod_aigc", "type": "output",
+                      "format": os.path.splitext(p)[1].lstrip(".") or "png"} for p in paths]
+        return {"ui": {"images": ui_images},
+                "result": (task_id, "\n".join(urls), "\n".join(paths), tensor)}
 
 
 class TencentVODAIGCQueryTask:
@@ -939,11 +946,11 @@ class TencentVODAIGCQueryTask:
 
     @classmethod
     def INPUT_TYPES(cls):
-        required = dict(_cred_inputs())
-        required["task_id"] = ("STRING", {"default": "", "tooltip": "CreateAigcVideoTask 返回的 TaskId"})
-        return {"required": required,
-                "optional": {"region": ("STRING", {"default": DEFAULT_REGION}),
-                             "endpoint": ("STRING", {"default": ""})}}
+        required = {"task_id": ("STRING", {"default": "", "tooltip": "CreateAigcVideoTask 返回的 TaskId"})}
+        optional = dict(_cred_inputs())          # 凭据选填：留空读 tencent-vod-config.json
+        optional["region"] = ("STRING", {"default": DEFAULT_REGION})
+        optional["endpoint"] = ("STRING", {"default": ""})
+        return {"required": required, "optional": optional}
 
     RETURN_TYPES = ("STRING", "STRING", "STRING")
     RETURN_NAMES = ("status", "video_urls", "raw_json")
