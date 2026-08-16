@@ -436,7 +436,101 @@ img_detail = {"TaskType": "AigcImageTask", "Status": "FINISH",
 status, err, err_ext, msg, urls = nodes._extract_task_result(img_detail)
 check("t2i: extract image urls", status == "FINISH" and urls == ["https://cdn/aigcImageGenFile.png"], str(urls))
 
+
+# ---- 22. 结果缓存（v1.13.0）----
+hpath = "/tmp/comfy_output/vod_aigc/execution_history.jsonl"
+if os.path.exists(hpath):
+    os.remove(hpath)
+cache_file = "/tmp/comfy_output/vod_aigc/cache_hit.mp4"
+if os.path.exists(cache_file):
+    os.remove(cache_file)
+with open(cache_file, "wb") as f:
+    f.write(b"fake-video-bytes")
+
+cache_calls = {"n": 0}
+def fake_cache_api(sid, sk, reg, ep, action, payload):
+    if action == "CreateAigcVideoTask":
+        cache_calls["n"] += 1
+        return {"TaskId": "t-cache-1"}
+    return {"TaskType": "AigcVideoTask", "Status": "FINISH",
+            "AigcVideoTask": {"Status": "FINISH", "Output": {"FileInfos": [
+                {"FileUrl": "https://cdn/cache.mp4"}]}}}
+nodes._call_api = fake_cache_api
+nodes._download_video = lambda url, task_id, on_progress=None, name_hint=None: cache_file
+
+# 22.1 首次运行 → 调 API，落台账
+out1 = nodes.TencentVODH3TextToVideo().generate("缓存测试", **params)
+check("cache: first run calls API", cache_calls["n"] == 1, cache_calls["n"])
+
+# 22.2 同参数再次 → 命中缓存：零 API 调用、返回同产物、台账标记 cached
+cache_calls["n"] = 0
+out2 = nodes.TencentVODH3TextToVideo().generate("缓存测试", **params)
+check("cache: second run zero API calls", cache_calls["n"] == 0, cache_calls["n"])
+check("cache: second run same result", out2 == out1, (out1, out2))
+rec = json.loads(open(hpath).read().strip().splitlines()[-1])
+check("cache: hit flagged in ledger", rec.get("cached") is True and bool(rec.get("cache_key")), rec)
+
+# 22.3 不同 prompt → 不命中
+cache_calls["n"] = 0
+nodes.TencentVODH3TextToVideo().generate("缓存测试换个词", **params)
+check("cache: different prompt misses", cache_calls["n"] == 1, cache_calls["n"])
+
+# 22.4 产物文件丢失 → 不命中（允许重新生成）
+cache_calls["n"] = 0
+os.remove(cache_file)
+nodes.TencentVODH3TextToVideo().generate("缓存测试", **params)
+check("cache: missing artifact misses", cache_calls["n"] == 1, cache_calls["n"])
+with open(cache_file, "wb") as f:
+    f.write(b"fake-video-bytes")
+
+# 22.5 use_cache=Disabled → 不命中
+cache_calls["n"] = 0
+p_disable = dict(params)
+p_disable["use_cache"] = "Disabled"
+nodes.TencentVODH3TextToVideo().generate("缓存测试", **p_disable)
+check("cache: disabled misses", cache_calls["n"] == 1, cache_calls["n"])
+
+# 22.6 失败记录不参与命中（装饰器级：失败落账后同键查不到）
+def fail_gen(self, prompt, **kwargs):
+    raise nodes.TaskError("t-fail", "H3 任务被拒绝（ErrCode=70000）")
+wrapped_fail = nodes._ledger("t2v")(fail_gen)
+try:
+    wrapped_fail(type("N", (), {})(), "缓存测试失败场景", **params)
+    check("cache: failing wrapped raises", False)
+except nodes.TaskError:
+    check("cache: failing wrapped raises", True)
+ck_f = nodes._cache_key("t2v", "缓存测试失败场景", params)
+check("cache: failed record not hit", nodes._find_cached_record(ck_f) is None)
+
+# 22.7 生图节点缓存命中：dict 返回 + preview 协议、零 API 调用
+img_path = "/tmp/comfy_output/vod_aigc/cache_hit.png"
+with open(img_path, "wb") as f:
+    f.write(b"fake-png")
+img_params = {"secret_id": "x", "secret_key": "y", "sub_app_id": "1500044236",
+              "model": "Jimeng 4.0", "output_image_count": 1, "output_format": "",
+              "filename": "", "ref_image_urls": "", "resolution": "1080P",
+              "aspect_ratio": "16:9", "storage_mode": "Temporary",
+              "region": "ap-guangzhou", "endpoint": "", "poll_interval": 3, "timeout": 60}
+ck_img = nodes._cache_key("t2i", "缓存生图", img_params)
+rec_img = nodes._base_record("t2i", "缓存生图", img_params, task_id="t-img-cache",
+                             url="https://cdn/i.png", path=img_path, cache_key=ck_img)
+with open(hpath, "a", encoding="utf-8") as f:
+    f.write(json.dumps(rec_img, ensure_ascii=False) + "\n")
+img_calls = {"n": 0}
+def fake_img_cache_api(sid, sk, reg, ep, action, payload):
+    img_calls["n"] += 1
+    raise AssertionError("缓存命中不应调用 API")
+nodes._call_api = fake_img_cache_api
+out_img = nodes.TencentVODAIGCImageTask().generate("缓存生图", **img_params)
+check("cache: image node hit returns dict", isinstance(out_img, dict) and "ui" in out_img and "result" in out_img, out_img)
+check("cache: image node zero API calls", img_calls["n"] == 0, img_calls["n"])
+r_img = out_img["result"]
+check("cache: image node 4-tuple", len(r_img) == 4 and r_img[0] == "t-img-cache" and r_img[2] == img_path, r_img)
+rec = json.loads(open(hpath).read().strip().splitlines()[-1])
+check("cache: image hit flagged", rec.get("cached") is True, rec)
+
 # ---- 汇总 ----
+print()
 print()
 if failures:
     print(f"RESULT: {len(failures)} FAILED: {failures}")

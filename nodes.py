@@ -518,7 +518,7 @@ def _view_url_for(path: str) -> str:
         return ""
 
 
-def _base_record(mode: str, prompt: str, kwargs: dict, task_id="", url="", path="", error=""):
+def _base_record(mode: str, prompt: str, kwargs: dict, task_id="", url="", path="", error="", cache_key=""):
     """构造台账记录：含计费要素（时长/分辨率/模型/张数），便于成本审计。
 
     视频按秒计费（元/秒 × 计费秒数）；生图按张计费（元/张 × 张数，按模型）。
@@ -549,8 +549,64 @@ def _base_record(mode: str, prompt: str, kwargs: dict, task_id="", url="", path=
         "view_url": _view_url_for(path) if path else "",
         "seconds_billed": seconds_billed,
         "estimated_cost": estimated_cost,
+        "cache_key": cache_key,
+        "cached": False,
         "error": (error or "")[:500],
     }
+
+
+def _cache_key(mode: str, prompt: str, kwargs: dict) -> str:
+    """结果缓存键：mode + prompt + 全部影响输出的参数 + 参考素材指纹。
+
+    同键且产物仍在 = 命中，直接复用本地文件（不调腾讯云 API）。
+    """
+    key = {"mode": mode, "prompt": prompt or ""}
+    for k in ("duration", "resolution", "aspect_ratio", "audio_generation", "storage_mode",
+              "enhance_prompt", "media_name", "model", "output_image_count", "output_format"):
+        if k in kwargs:
+            key[k] = kwargs[k]
+    refs = []
+    for k in ("ref_image_urls", "ref_video_paths", "ref_video_urls", "ref_audio_paths", "ref_audio_urls",
+              "first_frame_url", "last_frame_url", "filename"):
+        v = kwargs.get(k)
+        if v:
+            refs.append(f"{k}={v}")
+    img = kwargs.get("ref_images")
+    if img is not None:
+        try:
+            refs.append(f"ref_images={hashlib.sha256(img.cpu().numpy().tobytes()).hexdigest()[:16]}")
+        except Exception:
+            refs.append(f"ref_images=<unhashable>")
+    key["refs"] = "|".join(refs)
+    return hashlib.sha256(json.dumps(key, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+def _find_cached_record(cache_key: str):
+    """台账查重：返回同缓存键最近一次成功且产物文件仍在的记录，否则 None。"""
+    try:
+        out_dir = os.path.join(folder_paths.get_output_directory(), "vod_aigc")
+        ledger_path = os.path.join(out_dir, "execution_history.jsonl")
+        if not os.path.isfile(ledger_path):
+            return None
+        hit = None
+        with open(ledger_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("cache_key") != cache_key or rec.get("status") != "success":
+                    continue
+                paths = [p for p in (rec.get("video_path") or "").splitlines() if p]
+                if not paths or not all(os.path.isfile(p) for p in paths):
+                    continue  # 产物已丢失 → 不命中，允许重新生成
+                hit = rec  # 台账按时间追加，后写的覆盖
+        return hit
+    except Exception:
+        return None
 
 
 def _ledger(mode):
@@ -563,15 +619,33 @@ def _ledger(mode):
         def wrapper(self, prompt, **kwargs):
             m = mode or ("i2i" if (kwargs.get("ref_image") is not None
                                    or (kwargs.get("ref_image_urls") or "").strip()) else "t2i")
+            ck = _cache_key(m, prompt, kwargs)
+            # 结果缓存：同参数已成功且产物仍在 → 直接复用，零 API 调用
+            if kwargs.get("use_cache", "Enabled") != "Disabled":
+                hit = _find_cached_record(ck)
+                if hit is not None:
+                    task_id, url, path = hit.get("task_id", ""), hit.get("video_url", ""), hit.get("video_path", "")
+                    rec = _base_record(m, prompt, kwargs, task_id, url, path, cache_key=ck)
+                    rec["cached"] = True
+                    if m in ("t2i", "i2i"):
+                        paths = [p for p in (path or "").splitlines() if p]
+                        tensor = _paths_to_image_tensor(paths)
+                        ui_images = [{"filename": os.path.basename(p), "subfolder": "vod_aigc",
+                                      "type": "output", "format": os.path.splitext(p)[1].lstrip(".") or "png"}
+                                     for p in paths]
+                        _append_history(rec)
+                        return {"ui": {"images": ui_images}, "result": (task_id, url, path, tensor)}
+                    _append_history(rec)
+                    return (task_id, url, path)
             try:
                 original = fn(self, prompt, **kwargs)  # 元组，或 {"ui": ..., "result": ...} 字典（生图预览）
                 result = original.get("result") if isinstance(original, dict) else original
                 task_id, url, path = result[0], result[1], result[2]
-                _append_history(_base_record(m, prompt, kwargs, task_id, url, path))
+                _append_history(_base_record(m, prompt, kwargs, task_id, url, path, cache_key=ck))
                 return original  # 字典返回需原样保留 ui（预览协议）
             except Exception as e:
                 _append_history(_base_record(m, prompt, kwargs,
-                                             task_id=getattr(e, "task_id", ""), error=str(e)))
+                                             task_id=getattr(e, "task_id", ""), error=str(e), cache_key=ck))
                 raise
         return wrapper
     return deco
@@ -599,6 +673,8 @@ def _output_config_inputs():
         "audio_generation": (ON_OFF, {"default": "Enabled", "tooltip": "是否生成音频"}),
         "storage_mode": (STORAGE_MODES, {"default": "Temporary", "tooltip": "Temporary=临时存储(URL 限时有效) / Permanent=永久存储(可后续超分处理)"}),
         "enhance_prompt": (ON_OFF, {"default": "Disabled", "tooltip": "是否启用提示词增强（H3-Context-IR）"}),
+        "use_cache": (ON_OFF, {"default": "Enabled",
+                               "tooltip": "结果缓存：同参数（提示词/分辨率/参考素材等）已成功过的任务直接复用本地产物，不调用腾讯云 API。需要新结果时改 Disabled 或修改任一参数"}),
         "media_name": ("STRING", {"default": "", "tooltip": "可选，输出文件名/备注"}),
         "filename": ("STRING", {"default": "", "tooltip": "可选，本地保存文件名（不含扩展名，留空自动命名）"}),
         "region": ("STRING", {"default": DEFAULT_REGION, "tooltip": "腾讯云地域，如 ap-guangzhou"}),
@@ -917,6 +993,8 @@ class TencentVODAIGCImageTask:
             "endpoint": ("STRING", {"default": ""}),
             "poll_interval": ("INT", {"default": 10, "min": 3, "max": 120, "step": 1}),
             "timeout": ("INT", {"default": 600, "min": 60, "max": 7200, "step": 60}),
+            "use_cache": (ON_OFF, {"default": "Enabled",
+                                   "tooltip": "结果缓存：同参数（提示词/模型/参考素材等）已成功过的任务直接复用本地产物，不调用腾讯云 API。需要新结果时改 Disabled 或修改任一参数"}),
         })
         return {"required": required, "optional": optional}
 

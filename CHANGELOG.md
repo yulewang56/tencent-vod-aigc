@@ -1,5 +1,14 @@
 # Changelog
 
+## [v1.13.0] - 2026-08-16
+
+### Added
+- **结果缓存**：生成节点新增 `use_cache` 参数（默认 Enabled）。同参数（提示词/分辨率/时长/参考素材指纹）已成功且产物仍在的任务，直接复用本地文件，零 API 调用、零费用
+- 台账记录新增 `cache_key`（内容指纹）与 `cached`（命中标记）字段，缓存命中可审计
+
+### Notes
+- SessionId 未暴露：腾讯文档仅 PixVerse（3.12）请求参数支持 SessionId，H3/生图接口请求参数无此字段，遵循"只暴露文档化参数"原则不发明参数
+
 格式：[语义化版本](https://semver.org/lang/zh-CN/)，全部提交记录见 [GitHub Releases](https://github.com/yulewang56/tencent-vod-aigc/releases)。
 
 ## [1.12.7] - 2026-08-16
