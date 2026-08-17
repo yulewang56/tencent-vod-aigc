@@ -21,7 +21,8 @@ import types
 # ---- stub ComfyUI 依赖（nodes.py 在 ComfyUI 之外导入需要 folder_paths）----
 comfy = types.ModuleType("comfy")
 folder_paths = types.ModuleType("comfy.folder_paths")
-_repo_root = os.path.dirname(os.path.abspath(__file__))
+# scripts/ 子目录 → 上跳一级得到仓库根
+_repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 folder_paths.get_output_directory = lambda: os.path.join(_repo_root, "output")
 folder_paths.get_input_directory = lambda: os.path.join(_repo_root, "input")
 comfy.folder_paths = folder_paths
