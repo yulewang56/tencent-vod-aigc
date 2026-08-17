@@ -15,7 +15,7 @@ ComfyUI 自定义节点：通过**腾讯云 VOD AIGC** 聚合服务调用 **Mini
 | `VOD AIGC - H3 图生视频（首/尾帧）` | 首帧 / 尾帧 / 首尾帧生视频，支持 ComfyUI IMAGE、图片 URL 或本地图片路径 |
 | `VOD AIGC - H3 多模态参考生视频` | ≤9 图 + ≤3 视频 + ≤3 音频（总数 ≤12），支持本地文件或 URL |
 | `VOD AIGC - 文生图/图生图` | 生图：GEM / Jimeng（3.3.2）+ GPT-Image2（3.14，OG image2_low/medium/high），支持多图输出（1-8 张）、输出格式，可接 ComfyUI 图像、本地图片路径或参考图 URL；`preview_image` 输出 IMAGE 张量（原生预览 + 可接下游） |
-| `腾讯云 AIGC - 音乐生成 (MPS)` | AI 音乐生成：GL / MiniMaxMusic，支持歌词与纯音乐、参考音频（路径/URL）、mp3/wav 输出 |
+| `VOD AIGC - 音乐生成 (MPS)` | AI 音乐生成：GL / MiniMaxMusic，支持歌词与纯音乐、参考音频（路径/URL）、mp3/wav 输出 |
 | `VOD AIGC - 查询任务` | 按 TaskId 查状态（超时/失败排查用） |
 | `VOD AIGC - 下载视频` | 按 URL 重新下载视频 |
 | `VOD AIGC - 查看执行台账` | 显示 `output/vod_aigc/execution_history.jsonl` 中的历史记录（右下角浮窗） |
@@ -100,7 +100,7 @@ cp tencent-vod-config.example.json tencent-vod-config.json
 - **input_region**：素材 URL 在海外时填 `oversea`（避免拉取失败）
 - **endpoint**：默认 `vod.tencentcloudapi.com`；如已切换新版网关可填 `gateway.vod-qcloud.com`
 
-### 音乐生成节点（腾讯云 AIGC - 音乐生成 (MPS)）
+### 音乐生成节点（VOD AIGC - 音乐生成 (MPS)）
 
 - **model**：GL 2.0 / GL 3.0-clip / GL 3.0-pro，或 MiniMaxMusic 2.0 / 2.5 / 2.6
 - **prompt**：音乐风格 / 演唱要求描述，≤2000 字符

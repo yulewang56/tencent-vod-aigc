@@ -1417,7 +1417,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "TencentVODH3ImageToVideo": "VOD AIGC - H3 图生视频（首/尾帧）",
     "TencentVODH3ReferenceToVideo": "VOD AIGC - H3 多模态参考生视频",
     "TencentVODAIGCImageTask": "VOD AIGC - 文生图/图生图",
-    "TencentVODAIGCMusicTask": "腾讯云 AIGC - 音乐生成 (MPS)",
+    "TencentVODAIGCMusicTask": "VOD AIGC - 音乐生成 (MPS)",
     "TencentVODAIGCQueryTask": "VOD AIGC - 查询任务",
     "TencentVODAIGCDownloadVideo": "VOD AIGC - 下载视频",
     "TencentVODAIGCViewHistory": "VOD AIGC - 查看执行台账",

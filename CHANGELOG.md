@@ -1,5 +1,10 @@
 # Changelog
 
+## [v1.14.1] - 2026-08-17
+
+### 修复
+- 音乐生成节点显示名统一为 `VOD AIGC - 音乐生成 (MPS)`（与包内其他节点命名风格一致；接口仍为 MPS `CreateAigcAudioTask`）
+
 ## [v1.14.0] - 2026-08-17
 
 ### Added
@@ -8,7 +13,7 @@
   总数上限校验不变）。路径经 `~/`、`input/`、`output/` 解析后 Base64 上传（30MB 上限），
   并按白名单校验扩展名（.jpg/.jpeg/.png/.webp/.bmp，视频/音频路径同样补上校验）；
   路径素材参与结果缓存键（同参数复用产物）
-- **AI 音乐生成节点**（`腾讯云 AIGC - 音乐生成 (MPS)`）：MPS `CreateAigcAudioTask` / `DescribeAigcAudioTask`
+- **AI 音乐生成节点**（`VOD AIGC - 音乐生成 (MPS)`）：MPS `CreateAigcAudioTask` / `DescribeAigcAudioTask`
   （API 版本 2019-06-12，域名 mps.tencentcloudapi.com）。模型 GL 2.0 / 3.0-clip / 3.0-pro 与
   MiniMaxMusic 2.0 / 2.5 / 2.6；支持歌词（`AdditionalParameters.lyric`）与纯音乐（`is_instrumental`）、
   参考音频（路径/URL）、mp3/wav 输出、结果缓存；MPS 无 SubAppId，凭据仅需 SecretId/SecretKey。
