@@ -35,6 +35,11 @@ API_VERSION = "2018-07-17"
 DEFAULT_ENDPOINT = "vod.tencentcloudapi.com"
 DEFAULT_REGION = "ap-guangzhou"
 
+# MPS（媒体处理）AIGC 音乐生成：CreateAigcAudioTask / DescribeAigcAudioTask
+MPS_SERVICE = "mps"
+MPS_API_VERSION = "2019-06-12"
+MPS_ENDPOINT = "mps.tencentcloudapi.com"
+
 RESOLUTIONS = ["768P", "1080P", "2K", "4K"]
 ASPECT_RATIOS = ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"]
 ON_OFF = ["Enabled", "Disabled"]
@@ -60,8 +65,12 @@ def _canonical_headers(headers: dict, action: str) -> str:
     return "".join(parts)
 
 
-def _sign_request(secret_id: str, secret_key: str, region: str, endpoint: str, action: str, payload: dict):
-    """构造腾讯云 TC3-HMAC-SHA256 签名，返回 (headers, body_bytes)。"""
+def _sign_request(secret_id: str, secret_key: str, region: str, endpoint: str, action: str, payload: dict,
+                  version=API_VERSION, service=SERVICE):
+    """构造腾讯云 TC3-HMAC-SHA256 签名，返回 (headers, body_bytes)。
+
+    version / service 供 MPS 等其它产品使用（默认 VOD 的 2018-07-17 / vod）。
+    """
     ts = int(time.time())
     date = time.strftime("%Y-%m-%d", time.gmtime(ts))
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -70,7 +79,7 @@ def _sign_request(secret_id: str, secret_key: str, region: str, endpoint: str, a
         "Host": endpoint,
         "Content-Type": "application/json; charset=utf-8",
         "X-TC-Action": action,
-        "X-TC-Version": API_VERSION,
+        "X-TC-Version": version,
         "X-TC-Timestamp": str(ts),
     }
     if region:
@@ -85,7 +94,7 @@ def _sign_request(secret_id: str, secret_key: str, region: str, endpoint: str, a
         signed_headers,
         hashlib.sha256(body).hexdigest(),
     ])
-    credential_scope = f"{date}/{SERVICE}/tc3_request"
+    credential_scope = f"{date}/{service}/tc3_request"
     string_to_sign = "\n".join([
         "TC3-HMAC-SHA256",
         str(ts),
@@ -94,7 +103,7 @@ def _sign_request(secret_id: str, secret_key: str, region: str, endpoint: str, a
     ])
 
     secret_date = _hmac_sha256(("TC3" + secret_key).encode("utf-8"), date)
-    secret_service = _hmac_sha256(secret_date, SERVICE)
+    secret_service = _hmac_sha256(secret_date, service)
     secret_signing = _hmac_sha256(secret_service, "tc3_request")
     signature = hmac.new(secret_signing, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
 
@@ -105,11 +114,13 @@ def _sign_request(secret_id: str, secret_key: str, region: str, endpoint: str, a
     return headers, body
 
 
-def _call_api(secret_id: str, secret_key: str, region: str, endpoint: str, action: str, payload: dict) -> dict:
-    """调用腾讯云 VOD 接口，返回 Response 对象；业务错误抛 RuntimeError。"""
+def _call_api(secret_id: str, secret_key: str, region: str, endpoint: str, action: str, payload: dict,
+              version=API_VERSION, service=SERVICE) -> dict:
+    """调用腾讯云接口，返回 Response 对象；业务错误抛 RuntimeError。"""
     endpoint = (endpoint or DEFAULT_ENDPOINT).strip()
     endpoint = endpoint.replace("https://", "").replace("http://", "").rstrip("/")
-    headers, body = _sign_request(secret_id, secret_key, region, endpoint, action, payload)
+    headers, body = _sign_request(secret_id, secret_key, region, endpoint, action, payload,
+                                  version=version, service=service)
     req = urllib.request.Request(f"https://{endpoint}/", data=body, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
@@ -123,7 +134,7 @@ def _call_api(secret_id: str, secret_key: str, region: str, endpoint: str, actio
     response = data.get("Response", {})
     if response.get("Error"):
         err = response["Error"]
-        raise RuntimeError(f"腾讯云 VOD 接口错误 {err.get('Code')}: {err.get('Message')}")
+        raise RuntimeError(f"腾讯云接口错误 {err.get('Code')}: {err.get('Message')}")
     return response
 
 
@@ -182,6 +193,17 @@ def _resolve_credentials(secret_id, secret_key, sub_app_id):
     if not sub.isdigit():
         raise ValueError(f"SubAppId 必须为纯数字，当前值: {sub}")
     return sid, skey, sub
+
+
+def _resolve_secret_pair(secret_id, secret_key):
+    """凭据解析（仅密钥对）：供 MPS 等不使用 SubAppId 的服务（如音乐生成）。"""
+    file_creds = _load_config_file()
+    sid = (secret_id or "").strip() or file_creds.get("secret_id")
+    skey = (secret_key or "").strip() or file_creds.get("secret_key")
+    if not sid or not skey:
+        raise ValueError("缺少腾讯云密钥：请在节点填写 SecretId / SecretKey，或配置 "
+                         + _CRED_FILE_HINT)
+    return sid, skey
 
 
 def _credentials_configured() -> bool:
@@ -297,10 +319,14 @@ def _resolve_media_path(path: str) -> str:
     return p  # 兼容旧行为：相对进程 cwd
 
 
-def _file_to_base64(path: str, max_bytes: int, what: str) -> str:
+def _file_to_base64(path: str, max_bytes: int, what: str, allowed_exts=None) -> str:
     resolved = _resolve_media_path(path)
     if not os.path.isfile(resolved):
         raise ValueError(f"文件不存在: {path}（支持 ~/、input/xxx、output/xxx 或绝对路径）")
+    if allowed_exts:
+        ext = os.path.splitext(resolved)[1].lower()
+        if ext and ext not in allowed_exts:
+            raise ValueError(f"{what} 扩展名 \"{ext}\" 不支持，允许: {', '.join(allowed_exts)}（路径: {path[:80]}）")
     data = open(resolved, "rb").read()
     if len(data) > max_bytes:
         raise ValueError(f"{what} 超过 {max_bytes // (1024*1024)}MB 上限: {path}")
@@ -339,7 +365,13 @@ class TaskError(RuntimeError):
 
 
 def _extract_task_result(detail: dict):
-    """从 DescribeTaskDetail 响应中提取 AIGC 任务状态、错误信息与输出文件 URL（只取 Output 子树）。"""
+    """从任务查询响应中提取 AIGC 任务状态、错误信息与输出文件 URL。
+
+    兼容两种结构：
+    - VOD DescribeTaskDetail：详情嵌在 AigcVideoTask / AigcImageTask 子对象（正则 Aigc|SceneAigc\\w*Task），
+      输出在 Output.FileInfos[].FileUrl（Input 子树必须忽略）；
+    - MPS DescribeAigcAudioTask：状态与 AudioInfos[].Url 平铺在顶层（无 Task 子对象）。
+    """
     task_dict = None
     for key, value in detail.items():
         if isinstance(value, dict) and re.search(r"(Aigc|SceneAigc)\w*Task$", key):
@@ -359,36 +391,52 @@ def _extract_task_result(detail: dict):
         if isinstance(node, dict):
             if isinstance(node.get("FileUrl"), str):
                 urls.append(node["FileUrl"])
+            if isinstance(node.get("Url"), str):
+                urls.append(node["Url"])
             for v in node.values():
                 _walk(v)
         elif isinstance(node, list):
             for item in node:
                 _walk(item)
 
-    _walk(task_dict.get("Output") or {})
+    output = task_dict.get("Output")
+    if output:
+        _walk(output)      # VOD 结构：只走 Output 子树，忽略 Input
+    else:
+        _walk(task_dict)   # MPS 平铺结构：AudioInfos[].Url 在顶层
     return (status or "").upper(), err_code, err_code_ext, message, urls
 
 
 def _wait_for_task(secret_id, secret_key, region, endpoint, sub_app_id, task_id,
-                   poll_interval, timeout, on_progress=None, task_label="H3 生成中") -> dict:
-    """轮询 DescribeTaskDetail 直到任务完成，返回 {"status", "urls", "detail"}。"""
+                   poll_interval, timeout, on_progress=None, task_label="H3 生成中",
+                   action="DescribeTaskDetail", err_label="H3",
+                   version=API_VERSION, service=SERVICE) -> dict:
+    """轮询任务直到完成，返回 {"status", "urls", "detail"}。
+
+    action 默认 VOD DescribeTaskDetail；MPS 音乐任务传 DescribeAigcAudioTask
+    （查询仅 TaskId 一个参数，状态 DONE=成功 / FAIL=失败，错误文案前缀用 err_label）。
+    """
     deadline = time.time() + timeout
     started = time.time()
     while True:
-        response = _call_api(secret_id, secret_key, region, endpoint, "DescribeTaskDetail",
-                             {"SubAppId": int(sub_app_id), "TaskId": task_id})
+        if action == "DescribeAigcAudioTask":
+            query = {"TaskId": task_id}  # MPS 查询接口无 SubAppId 参数
+        else:
+            query = {"SubAppId": int(sub_app_id), "TaskId": task_id}
+        response = _call_api(secret_id, secret_key, region, endpoint, action, query,
+                             version=version, service=service)
         # 真实响应把任务详情平铺在 Response 顶层（部分文档描述为嵌套在 TaskDetail，两者都兼容）
         detail = response.get("TaskDetail") or response
         status, err_code, err_code_ext, message, urls = _extract_task_result(detail)
-        if status in ("SUCCESS", "FINISH"):
+        if status in ("SUCCESS", "FINISH", "DONE"):
             if not urls:
                 if err_code or err_code_ext or message:
                     hint = "（提示词或素材触发内容安全审核，请修改后重试）" if err_code_ext and "Violation" in err_code_ext else ""
-                    raise TaskError(task_id, f"H3 任务被拒绝（ErrCode={err_code} ErrCodeExt={err_code_ext or '-'} Message={message or '-'}）TaskId: {task_id} {hint}".rstrip())
+                    raise TaskError(task_id, f"{err_label} 任务被拒绝（ErrCode={err_code} ErrCodeExt={err_code_ext or '-'} Message={message or '-'}）TaskId: {task_id} {hint}".rstrip())
                 raise TaskError(task_id, f"任务成功但未找到输出文件 URL（原始响应: {json.dumps(detail, ensure_ascii=False)[:400]}）")
             return {"status": status, "urls": urls, "detail": detail}
         if status in ("FAIL", "FAILED", "ERROR"):
-            raise TaskError(task_id, f"H3 任务失败 (ErrCode={err_code}): {message or '未知错误'}（TaskId: {task_id}）")
+            raise TaskError(task_id, f"{err_label} 任务失败 (ErrCode={err_code}): {message or '未知错误'}（TaskId: {task_id}）")
         if time.time() > deadline:
             raise TaskError(task_id, f"任务超时（{timeout}s 未完成）。TaskId: {task_id}，可用「VOD AIGC - 查询任务」节点手动查询")
         elapsed = int(time.time() - started)
@@ -521,12 +569,16 @@ def _view_url_for(path: str) -> str:
 def _base_record(mode: str, prompt: str, kwargs: dict, task_id="", url="", path="", error="", cache_key=""):
     """构造台账记录：含计费要素（时长/分辨率/模型/张数），便于成本审计。
 
-    视频按秒计费（元/秒 × 计费秒数）；生图按张计费（元/张 × 张数，按模型）。
+    视频按秒计费（元/秒 × 计费秒数）；生图按张计费（元/张 × 张数，按模型）；
+    音乐生成（t2a）不计秒不计费，费用恒为 0。
     """
     if mode in ("t2i", "i2i"):
         model = kwargs.get("model") or ""
         image_count = int(kwargs.get("output_image_count") or 1)
         seconds_billed, estimated_cost = 0, round(image_count * _image_price_for(model), 4)
+    elif mode == "t2a":
+        model, image_count = kwargs.get("model") or "", 0
+        seconds_billed, estimated_cost = 0, 0.0  # 音乐生成不计秒不计费
     else:
         model, image_count = "", 0
         seconds_billed, estimated_cost = _estimate_cost(kwargs.get("resolution") or "",
@@ -562,12 +614,15 @@ def _cache_key(mode: str, prompt: str, kwargs: dict) -> str:
     """
     key = {"mode": mode, "prompt": prompt or ""}
     for k in ("duration", "resolution", "aspect_ratio", "audio_generation", "storage_mode",
-              "enhance_prompt", "media_name", "model", "output_image_count", "output_format"):
+              "enhance_prompt", "media_name", "model", "output_image_count", "output_format",
+              "lyrics", "is_instrumental"):
         if k in kwargs:
             key[k] = kwargs[k]
     refs = []
-    for k in ("ref_image_urls", "ref_video_paths", "ref_video_urls", "ref_audio_paths", "ref_audio_urls",
-              "first_frame_url", "last_frame_url", "filename"):
+    for k in ("ref_image_urls", "ref_image_paths", "ref_video_paths", "ref_video_urls",
+              "ref_audio_paths", "ref_audio_urls",
+              "first_frame_url", "first_frame_path", "last_frame_url", "last_frame_path",
+              "filename"):
         v = kwargs.get(k)
         if v:
             refs.append(f"{k}={v}")
@@ -618,7 +673,8 @@ def _ledger(mode):
         @functools.wraps(fn)
         def wrapper(self, prompt, **kwargs):
             m = mode or ("i2i" if (kwargs.get("ref_image") is not None
-                                   or (kwargs.get("ref_image_urls") or "").strip()) else "t2i")
+                                   or (kwargs.get("ref_image_urls") or "").strip()
+                                   or (kwargs.get("ref_image_paths") or "").strip()) else "t2i")
             ck = _cache_key(m, prompt, kwargs)
             # 结果缓存：同参数已成功且产物仍在 → 直接复用，零 API 调用
             if kwargs.get("use_cache", "Enabled") != "Disabled":
@@ -710,6 +766,30 @@ def _build_payload(sub_app_id, prompt, enhance_prompt, oc_values, file_infos=Non
     return payload
 
 
+def _build_music_payload(prompt, model, oc_values, file_infos=None):
+    """构造 MPS CreateAigcAudioTask 请求体（GL / MiniMaxMusic 音乐生成）。
+
+    注意：MPS 无 SubAppId 参数；AdditionalParameters 为 JSON 字符串
+    （歌词 {"lyric":"..."} 或纯音乐 {"is_instrumental":true}，由调用方拼好传入）。
+    """
+    name, _, version = (model or "MiniMaxMusic 2.6").partition(" ")
+    payload = {
+        "ModelName": name,
+        "ModelVersion": version,
+        "SceneType": "music",
+        "Prompt": prompt,
+    }
+    ap = (oc_values.get("additional_parameters") or "").strip()
+    if ap:
+        payload["AdditionalParameters"] = ap
+    fmt = (oc_values.get("output_format") or "").strip()
+    if fmt:
+        payload["OutputAudioFormat"] = fmt
+    if file_infos:
+        payload["AudioInfos"] = file_infos
+    return payload
+
+
 def _build_image_payload(sub_app_id, prompt, model, oc_values, file_infos=None):
     """构造 CreateAigcImageTask 请求体（3.3.2 GEM/Jimeng、3.14 GPT-Image2）。"""
     name, _, version = (model or "Jimeng 4.0").partition(" ")
@@ -793,6 +873,8 @@ class TencentVODH3ImageToVideo:
         optional.update(_output_config_inputs())
         optional["first_frame"] = ("IMAGE", {"tooltip": "首帧图（ComfyUI 图像，转 Base64 上传）"})
         optional["last_frame"] = ("IMAGE", {"tooltip": "尾帧图"})
+        optional["first_frame_path"] = ("STRING", {"default": "", "tooltip": "首帧图本地路径（支持 ~/、input/xxx、output/xxx 或绝对路径；与 first_frame / first_frame_url 三选一）"})
+        optional["last_frame_path"] = ("STRING", {"default": "", "tooltip": "尾帧图本地路径（与 last_frame / last_frame_url 三选一）"})
         optional["first_frame_url"] = ("STRING", {"default": "", "tooltip": "首帧图 URL（可匿名下载的图片直链，与 first_frame 二选一）"})
         optional["last_frame_url"] = ("STRING", {"default": "", "tooltip": "尾帧图 URL"})
         return {"required": required, "optional": optional}
@@ -816,8 +898,9 @@ class TencentVODH3ImageToVideo:
         for key, usage in (("first_frame", "FirstFrame"), ("last_frame", "LastFrame")):
             tensor = kwargs.get(key)
             url = (kwargs.get(f"{key}_url") or "").strip()
-            if tensor is not None and url:
-                raise ValueError(f"{usage} 同时提供了 IMAGE 和 URL，请只保留一种")
+            path = (kwargs.get(f"{key}_path") or "").strip()
+            if sum(x is not None and x != "" for x in (tensor, url, path)) > 1:
+                raise ValueError(f"{usage} 同时提供了 IMAGE / URL / 本地路径，请只保留一种")
             if tensor is not None:
                 data = _image_tensor_to_base64(tensor, 0 if key == "first_frame" else -1)
                 base64_total += len(data)
@@ -827,9 +910,15 @@ class TencentVODH3ImageToVideo:
             elif url:
                 _validate_media_url(url, _ALLOWED_IMAGE_EXTS, f"{usage}图")
                 file_infos.append({"Type": "Url", "Category": "Image", "Url": url, "Usage": usage})
+            elif path:
+                data = _file_to_base64(path, _MAX_IMAGE_BYTES, f"{usage}图", _ALLOWED_IMAGE_EXTS)
+                base64_total += len(data)
+                if base64_total > _MAX_BASE64_TOTAL:
+                    raise ValueError("Base64 素材总大小超过 70MB 上限")
+                file_infos.append({"Type": "Base64", "Category": "Image", "Base64": data, "Usage": usage})
 
         if not file_infos:
-            raise ValueError("至少提供一张首帧/尾帧图（IMAGE 或 URL）")
+            raise ValueError("至少提供一张首帧/尾帧图（IMAGE / URL / 本地路径）")
 
         secret_id, secret_key, sub_app_id = _resolve_credentials(
             kwargs.get("secret_id"), kwargs.get("secret_key"), kwargs.get("sub_app_id"))
@@ -862,6 +951,7 @@ class TencentVODH3ReferenceToVideo:
         optional = dict(_cred_inputs())          # 凭据选填：留空读 tencent-vod-config.json
         optional.update(_output_config_inputs())
         optional["ref_images"] = ("IMAGE", {"tooltip": "参考图，支持批量（batch）：多张图请先合成 batch（如 Load Images / ImageBatch 节点），每帧一张，最多 9 张；也可用 ref_image_urls 传多个 URL"})
+        optional["ref_image_paths"] = ("STRING", {"multiline": True, "default": "", "tooltip": "本地参考图路径，每行一个（最多 9 张），支持 ~/、input/xxx、output/xxx 或绝对路径"})
         optional["ref_image_urls"] = ("STRING", {"multiline": True, "default": "", "tooltip": "参考图 URL，每行一个，最多 9 个。必须为可匿名下载的图片直链（.jpg/.png 等），不支持网页地址"})
         optional["ref_video_paths"] = ("STRING", {"multiline": True, "default": "", "tooltip": "本地参考视频路径，每行一个（2-15 秒/段，最多 3 段，共 ≤15 秒）"})
         optional["ref_video_urls"] = ("STRING", {"multiline": True, "default": "", "tooltip": "参考视频 URL，每行一个。必须为可匿名下载的视频直链（.mp4/.mov 等），不支持网页地址（如 B 站/抖音页面）；网页视频请先下载到本地用 ref_video_paths"})
@@ -897,6 +987,12 @@ class TencentVODH3ReferenceToVideo:
                 base64_total += len(data)
                 file_infos.append({"Type": "Base64", "Category": "Image", "Base64": data, "Usage": "Reference"})
 
+        # 参考图：本地路径
+        for path in _parse_multiline(kwargs.get("ref_image_paths")):
+            data = _file_to_base64(path, _MAX_IMAGE_BYTES, "参考图", _ALLOWED_IMAGE_EXTS)
+            base64_total += len(data)
+            file_infos.append({"Type": "Base64", "Category": "Image", "Base64": data, "Usage": "Reference"})
+
         # 参考图：URL
         for url in _parse_multiline(kwargs.get("ref_image_urls")):
             _validate_media_url(url, _ALLOWED_IMAGE_EXTS, "参考图")
@@ -904,7 +1000,7 @@ class TencentVODH3ReferenceToVideo:
 
         # 参考视频
         for path in _parse_multiline(kwargs.get("ref_video_paths")):
-            data = _file_to_base64(path, _MAX_VIDEO_BYTES, "参考视频")
+            data = _file_to_base64(path, _MAX_VIDEO_BYTES, "参考视频", _ALLOWED_VIDEO_EXTS)
             base64_total += len(data)
             file_infos.append({"Type": "Base64", "Category": "Video", "Base64": data, "Usage": "Reference"})
         for url in _parse_multiline(kwargs.get("ref_video_urls")):
@@ -913,7 +1009,7 @@ class TencentVODH3ReferenceToVideo:
 
         # 参考音频
         for path in _parse_multiline(kwargs.get("ref_audio_paths")):
-            data = _file_to_base64(path, _MAX_AUDIO_BYTES, "参考音频")
+            data = _file_to_base64(path, _MAX_AUDIO_BYTES, "参考音频", _ALLOWED_AUDIO_EXTS)
             base64_total += len(data)
             file_infos.append({"Type": "Base64", "Category": "Audio", "Base64": data, "Usage": "Reference"})
         for url in _parse_multiline(kwargs.get("ref_audio_urls")):
@@ -982,7 +1078,9 @@ class TencentVODAIGCImageTask:
             "output_format": (["", "png", "jpeg"], {"default": "",
                                                     "tooltip": "输出格式（OG 支持 png/jpeg；留空跟随模型默认）"}),
             "filename": ("STRING", {"default": "", "tooltip": "可选，本地保存文件名（不含扩展名，留空自动命名；多图自动加序号）"}),
-            "ref_image": ("IMAGE", {"tooltip": "参考图（图生图）。多张请先合成 batch，每帧一张，最多 9 张；或用 ref_image_urls"}),
+            "ref_image": ("IMAGE", {"tooltip": "参考图（图生图）。多张请先合成 batch，每帧一张，最多 9 张；或用 ref_image_paths / ref_image_urls"}),
+            "ref_image_paths": ("STRING", {"multiline": True, "default": "",
+                                           "tooltip": "参考图本地路径（图生图），每行一个，最多 9 个。支持 ~/、input/xxx、output/xxx 或绝对路径"}),
             "ref_image_urls": ("STRING", {"multiline": True, "default": "",
                                           "tooltip": "参考图 URL（图生图），每行一个，最多 9 个。必须为可匿名下载的图片直链，不支持网页地址"}),
             "resolution": (["768P", "1080P", "1K", "2K"], {"default": "1080P",
@@ -1023,6 +1121,9 @@ class TencentVODAIGCImageTask:
                 data = _image_tensor_to_base64(ref_image, i)
                 # 生图 FileInfos 仅 Type + Base64/Url（与生视频不同，无 Category/Usage）
                 file_infos.append({"Type": "Base64", "Base64": data})
+        for path in _parse_multiline(kwargs.get("ref_image_paths")):
+            data = _file_to_base64(path, _MAX_IMAGE_BYTES, "参考图", _ALLOWED_IMAGE_EXTS)
+            file_infos.append({"Type": "Base64", "Base64": data})
         for url in _parse_multiline(kwargs.get("ref_image_urls")):
             _validate_media_url(url, _ALLOWED_IMAGE_EXTS, "参考图")
             file_infos.append({"Type": "Url", "Url": url})
@@ -1055,6 +1156,111 @@ class TencentVODAIGCImageTask:
                       "format": os.path.splitext(p)[1].lstrip(".") or "png"} for p in paths]
         return {"ui": {"images": ui_images},
                 "result": (task_id, "\n".join(urls), "\n".join(paths), tensor)}
+
+
+class TencentVODAIGCMusicTask:
+    """AI 音乐生成：MPS CreateAigcAudioTask / DescribeAigcAudioTask（GL / MiniMaxMusic）。
+
+    支持歌词（AdditionalParameters.lyric）与纯音乐（is_instrumental）两种模式；
+    可传参考音频（AudioInfos，路径或 URL）；输出 mp3/wav 下载到 output/vod_aigc/。
+    注意：MPS 接口无 SubAppId，凭据仅需 SecretId/SecretKey（节点输入或配置文件）。
+    """
+
+    _MUSIC_MODELS = ["GL 2.0", "GL 3.0-clip", "GL 3.0-pro",
+                     "MiniMaxMusic 2.0", "MiniMaxMusic 2.5", "MiniMaxMusic 2.6"]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        required = {"prompt": ("STRING", {"multiline": True, "default": "",
+                                           "tooltip": "音乐风格 / 演唱要求描述，上限 2000 字符"})}
+        optional = dict(_cred_inputs())          # 凭据选填：留空读 tencent-vod-config.json
+        optional.update({
+            "model": (cls._MUSIC_MODELS, {"default": "MiniMaxMusic 2.6",
+                                          "tooltip": "音乐模型：GL 2.0 / 3.0-clip / 3.0-pro；MiniMaxMusic 2.0 / 2.5 / 2.6"}),
+            "lyrics": ("STRING", {"multiline": True, "default": "",
+                                  "tooltip": "歌词（可选），换行分段；与 is_instrumental 互斥"}),
+            "is_instrumental": (ON_OFF, {"default": "Disabled",
+                                         "tooltip": "纯音乐模式（无歌词演唱）；与歌词互斥"}),
+            "output_format": (["", "mp3", "wav"], {"default": "",
+                                                   "tooltip": "输出格式（mp3/wav，留空跟随模型默认）"}),
+            "ref_audio_paths": ("STRING", {"multiline": True, "default": "",
+                                           "tooltip": "本地参考音频路径，每行一个（最多 3 个），支持 ~/、input/xxx、output/xxx 或绝对路径"}),
+            "ref_audio_urls": ("STRING", {"multiline": True, "default": "",
+                                          "tooltip": "参考音频 URL，每行一个。必须为可匿名下载的音频直链（.mp3/.wav 等），不支持网页地址"}),
+            "filename": ("STRING", {"default": "", "tooltip": "可选，本地保存文件名（不含扩展名，留空自动命名）"}),
+            "use_cache": (ON_OFF, {"default": "Enabled",
+                                   "tooltip": "结果缓存：同参数（提示词/模型/歌词/参考音频等）已成功过的任务直接复用本地产物，不调用腾讯云 API。需要新结果时改 Disabled 或修改任一参数"}),
+            "region": ("STRING", {"default": DEFAULT_REGION}),
+            "endpoint": ("STRING", {"default": MPS_ENDPOINT, "tooltip": "API 地址，留空用 mps.tencentcloudapi.com"}),
+            "poll_interval": ("INT", {"default": 10, "min": 3, "max": 120, "step": 1}),
+            "timeout": ("INT", {"default": 600, "min": 60, "max": 7200, "step": 60}),
+        })
+        return {"required": required, "optional": optional}
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("task_id", "audio_url", "audio_path")
+    FUNCTION = "generate"
+    CATEGORY = "Tencent VOD AIGC"
+    OUTPUT_NODE = True
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("NaN")  # 每次都提交新任务，不缓存
+
+    @_ledger("t2a")  # 音乐生成：台账不计秒不计费（estimated_cost=0）
+    def generate(self, prompt, **kwargs):
+        prompt = (prompt or "").strip()
+        if not prompt:
+            raise ValueError("Prompt 不能为空")
+        if len(prompt) > 2000:
+            raise ValueError(f"Prompt 超过 2000 字符上限（当前 {len(prompt)} 字符）")
+
+        lyrics = (kwargs.get("lyrics") or "").strip()
+        instrumental = kwargs.get("is_instrumental", "Disabled") == "Enabled"
+        if lyrics and instrumental:
+            raise ValueError("已填写歌词又开启纯音乐（is_instrumental），两种模式互斥，请只保留一种")
+
+        secret_id, secret_key = _resolve_secret_pair(kwargs.get("secret_id"), kwargs.get("secret_key"))
+        region = kwargs.get("region") or ""
+        endpoint = kwargs.get("endpoint") or MPS_ENDPOINT
+
+        file_infos = []
+        base64_total = 0
+        for path in _parse_multiline(kwargs.get("ref_audio_paths")):
+            data = _file_to_base64(path, _MAX_AUDIO_BYTES, "参考音频", _ALLOWED_AUDIO_EXTS)
+            base64_total += len(data)
+            file_infos.append({"Type": "Base64", "Base64": data})
+        for url in _parse_multiline(kwargs.get("ref_audio_urls")):
+            _validate_media_url(url, _ALLOWED_AUDIO_EXTS, "参考音频")
+            file_infos.append({"Type": "Url", "Url": url})
+        if base64_total > _MAX_BASE64_TOTAL:
+            raise ValueError("Base64 素材总大小超过 70MB 上限")
+
+        additional = {}
+        if lyrics:
+            additional["lyric"] = lyrics
+        if instrumental:
+            additional["is_instrumental"] = True
+        kwargs = dict(kwargs)
+        kwargs["additional_parameters"] = json.dumps(additional, ensure_ascii=False) if additional else ""
+        payload = _build_music_payload(prompt, kwargs.get("model"), kwargs, file_infos or None)
+        _set_status(self, "提交音乐生成任务…")
+        response = _call_api(secret_id, secret_key, region, endpoint, "CreateAigcAudioTask", payload,
+                             version=MPS_API_VERSION, service=MPS_SERVICE)
+        task_id = response.get("TaskId")
+        if not task_id:
+            raise RuntimeError(f"未返回 TaskId（原始响应: {json.dumps(response, ensure_ascii=False)[:400]}）")
+        result = _wait_for_task(secret_id, secret_key, region, endpoint, None, task_id,
+                                kwargs.get("poll_interval", 10), kwargs.get("timeout", 600),
+                                on_progress=lambda t: _set_status(self, t),
+                                task_label="音乐生成中", action="DescribeAigcAudioTask",
+                                err_label="音乐", version=MPS_API_VERSION, service=MPS_SERVICE)
+        url = result["urls"][0]
+        _set_status(self, "下载音频…")
+        path = _download_video(url, task_id, on_progress=lambda t: _set_status(self, t),
+                               name_hint=kwargs.get("filename"))
+        _set_status(self, "完成")
+        return (task_id, url, path)
 
 
 class TencentVODAIGCQueryTask:
@@ -1172,13 +1378,16 @@ class TencentVODAIGCViewHistory:
                 if r.get("mode") in ("t2i", "i2i"):
                     img_n = r.get("image_count") or 1
                     cost_txt = f"≈¥{cost:.2f}/{img_n}张" if cost > 0 else "¥未配置单价"
+                elif r.get("mode") == "t2a":
+                    cost_txt = f"≈¥{cost:.2f}" if cost > 0 else "¥未配置单价"
                 else:
                     cost_txt = f"≈¥{cost:.2f}/{billed}s" if cost > 0 else "¥未配置单价"
+                spec = "音乐" if r.get("mode") == "t2a" else f"{r.get('resolution', '')}/{r.get('duration', '')}s"
                 url_or_asset = r.get("video_url") or asset
                 view = r.get("view_url") or ""
                 lines.append(
                     f"[{i}] {r.get('time', '')} {marker} {r.get('mode', '')} "
-                    f"{r.get('resolution', '')}/{r.get('duration', '')}s {cost_txt}"
+                    f"{spec} {cost_txt}"
                     f" | {str(r.get('prompt', ''))[:40]} | {str(r.get('task_id', ''))[-16:]}"
                     f" | {url_or_asset}{(' | ' + view) if view else ''}{err}"
                 )
@@ -1187,7 +1396,7 @@ class TencentVODAIGCViewHistory:
         return {"ui": {"text": [text]}, "result": (text, ledger)}
 
 
-# 三个生成节点接入执行台账：成功/失败都落盘一条 JSONL 记录
+# 视频类生成节点接入执行台账：成功/失败都落盘一条 JSONL 记录（生图/音乐节点在类内装饰）
 TencentVODH3TextToVideo.generate = _ledger("t2v")(TencentVODH3TextToVideo.generate)
 TencentVODH3ImageToVideo.generate = _ledger("i2v")(TencentVODH3ImageToVideo.generate)
 TencentVODH3ReferenceToVideo.generate = _ledger("r2v")(TencentVODH3ReferenceToVideo.generate)
@@ -1197,6 +1406,7 @@ NODE_CLASS_MAPPINGS = {
     "TencentVODH3ImageToVideo": TencentVODH3ImageToVideo,
     "TencentVODH3ReferenceToVideo": TencentVODH3ReferenceToVideo,
     "TencentVODAIGCImageTask": TencentVODAIGCImageTask,
+    "TencentVODAIGCMusicTask": TencentVODAIGCMusicTask,
     "TencentVODAIGCQueryTask": TencentVODAIGCQueryTask,
     "TencentVODAIGCDownloadVideo": TencentVODAIGCDownloadVideo,
     "TencentVODAIGCViewHistory": TencentVODAIGCViewHistory,
@@ -1207,6 +1417,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "TencentVODH3ImageToVideo": "VOD AIGC - H3 图生视频（首/尾帧）",
     "TencentVODH3ReferenceToVideo": "VOD AIGC - H3 多模态参考生视频",
     "TencentVODAIGCImageTask": "VOD AIGC - 文生图/图生图",
+    "TencentVODAIGCMusicTask": "腾讯云 AIGC - 音乐生成 (MPS)",
     "TencentVODAIGCQueryTask": "VOD AIGC - 查询任务",
     "TencentVODAIGCDownloadVideo": "VOD AIGC - 下载视频",
     "TencentVODAIGCViewHistory": "VOD AIGC - 查看执行台账",

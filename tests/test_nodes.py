@@ -32,8 +32,8 @@ def check(name, cond, detail=""):
 # ---- 1. node registry ----
 expected = ["TencentVODH3TextToVideo", "TencentVODH3ImageToVideo",
             "TencentVODH3ReferenceToVideo", "TencentVODAIGCImageTask",
-            "TencentVODAIGCQueryTask", "TencentVODAIGCDownloadVideo",
-            "TencentVODAIGCViewHistory"]
+            "TencentVODAIGCMusicTask", "TencentVODAIGCQueryTask",
+            "TencentVODAIGCDownloadVideo", "TencentVODAIGCViewHistory"]
 check("all nodes registered", set(expected) == set(nodes.NODE_CLASS_MAPPINGS),
       f"got {sorted(nodes.NODE_CLASS_MAPPINGS)}")
 check("display names cover all", set(expected) == set(nodes.NODE_DISPLAY_NAME_MAPPINGS))
@@ -96,7 +96,7 @@ check("extract: FAIL status", status == "FAIL" and err == 70000)
 
 # ---- 5. polling loop with mocked API ----
 calls = []
-def fake_call(secret_id, secret_key, region, endpoint, action, payload):
+def fake_call(secret_id, secret_key, region, endpoint, action, payload, version="", service=""):
     calls.append(action)
     if action == "CreateAigcVideoTask":
         return {"TaskId": "1500044236-AigcVideoTask-deadbeef"}
@@ -173,7 +173,7 @@ nested = {"TaskDetail": {"TaskType": "AigcVideoTask", "Status": "FINISH",
                          "AigcVideoTask": {"Status": "FINISH", "Output": {"FileInfos": [
                              {"FileUrl": "https://cdn/nested.mp4"}]}}}}
 calls2 = []
-def fake_call_nested(sid, sk, reg, ep, action, payload):
+def fake_call_nested(sid, sk, reg, ep, action, payload, version="", service=""):
     calls2.append(action)
     if action == "CreateAigcVideoTask":
         return {"TaskId": "t1"}
@@ -188,7 +188,7 @@ hpath = "/tmp/comfy_output/vod_aigc/execution_history.jsonl"
 if os.path.exists(hpath):
     os.remove(hpath)
 
-def fake_success_api(sid, sk, reg, ep, action, payload):
+def fake_success_api(sid, sk, reg, ep, action, payload, version="", service=""):
     if action == "CreateAigcVideoTask":
         return {"TaskId": "t-ledger-1"}
     return {"TaskType": "AigcVideoTask", "Status": "FINISH",
@@ -246,7 +246,7 @@ check("billing: view url", nodes._view_url_for("/tmp/comfy_output/vod_aigc/x.mp4
 
 # ---- 11. 内容审核拒绝（v1.4.1）----
 reject_calls = []
-def fake_reject(secret_id, secret_key, region, endpoint, action, payload):
+def fake_reject(secret_id, secret_key, region, endpoint, action, payload, version="", service=""):
     reject_calls.append(action)
     if action == "CreateAigcVideoTask":
         return {"TaskId": "1500044236-AigcVideoTask-rejected01t"}
@@ -396,7 +396,7 @@ orig_b64 = nodes._image_tensor_to_base64
 orig_dl = nodes._download_video
 nodes._image_tensor_to_base64 = lambda t, i: f"b64-{i}"
 nodes._download_video = lambda url, task_id, on_progress=None, name_hint=None: "/tmp/fake.png"
-def fake_img_call(secret_id, secret_key, region, endpoint, action, payload):
+def fake_img_call(secret_id, secret_key, region, endpoint, action, payload, version="", service=""):
     if action == "CreateAigcImageTask":
         captured2["payload"] = payload
         return {"TaskId": "1500044236-AigcImageTask-abc123t"}
@@ -448,7 +448,7 @@ with open(cache_file, "wb") as f:
     f.write(b"fake-video-bytes")
 
 cache_calls = {"n": 0}
-def fake_cache_api(sid, sk, reg, ep, action, payload):
+def fake_cache_api(sid, sk, reg, ep, action, payload, version="", service=""):
     if action == "CreateAigcVideoTask":
         cache_calls["n"] += 1
         return {"TaskId": "t-cache-1"}
@@ -529,6 +529,258 @@ check("cache: image node 4-tuple", len(r_img) == 4 and r_img[0] == "t-img-cache"
 rec = json.loads(open(hpath).read().strip().splitlines()[-1])
 check("cache: image hit flagged", rec.get("cached") is True, rec)
 
+# ---- 23. 图片本地路径输入（v1.14.0）----
+import base64 as _b64
+_tmp_p = _tf.mkdtemp()
+ref_png = os.path.join(_tmp_p, "ref.png")
+with open(ref_png, "wb") as f:
+    f.write(b"\x89PNG fake bytes")
+bad_txt = os.path.join(_tmp_p, "ref.txt")
+with open(bad_txt, "wb") as f:
+    f.write(b"not an image")
+
+# 23.1 路径加载与扩展名白名单
+b64_png = nodes._file_to_base64(ref_png, nodes._MAX_IMAGE_BYTES, "参考图", nodes._ALLOWED_IMAGE_EXTS)
+check("path: image loads to base64", _b64.b64decode(b64_png) == b"\x89PNG fake bytes")
+try:
+    nodes._file_to_base64(bad_txt, nodes._MAX_IMAGE_BYTES, "参考图", nodes._ALLOWED_IMAGE_EXTS)
+    check("path: bad image ext rejected", False)
+except ValueError as e:
+    check("path: bad image ext rejected", ".txt" in str(e) and ".png" in str(e), str(e))
+try:
+    nodes._file_to_base64(bad_txt, nodes._MAX_VIDEO_BYTES, "参考视频", nodes._ALLOWED_VIDEO_EXTS)
+    check("path: bad video ext rejected", False)
+except ValueError:
+    check("path: bad video ext rejected", True)
+try:
+    nodes._file_to_base64(os.path.join(_tmp_p, "none.png"), 1024, "参考图", nodes._ALLOWED_IMAGE_EXTS)
+    check("path: missing file raises", False)
+except ValueError:
+    check("path: missing file raises", True)
+
+# 23.2 图生视频：路径与 URL 冲突报错
+try:
+    nodes.TencentVODH3ImageToVideo().generate("p", first_frame_path=ref_png, first_frame_url="https://x/a.png",
+                                              **params)
+    check("path: url+path conflict raises", False)
+except ValueError as e:
+    check("path: url+path conflict raises", "同时提供" in str(e), str(e))
+
+# 23.3 图生视频：first_frame_path 全流程（payload FileInfos）
+captured_i2v = {}
+orig_call_p = nodes._call_api
+orig_dl_p = nodes._download_video
+def fake_i2v_path_call(sid, sk, reg, ep, action, payload, version="", service=""):
+    if action == "CreateAigcVideoTask":
+        captured_i2v["payload"] = payload
+        return {"TaskId": "t-i2v-path1"}
+    return {"TaskType": "AigcVideoTask", "Status": "FINISH",
+            "AigcVideoTask": {"Status": "FINISH", "Output": {"FileInfos": [
+                {"FileUrl": "https://cdn/out.mp4"}]}}}
+nodes._call_api = fake_i2v_path_call
+nodes._download_video = lambda url, task_id, on_progress=None, name_hint=None: "/tmp/comfy_output/vod_aigc/out.mp4"
+try:
+    p_i2v = dict(params)
+    p_i2v["first_frame_path"] = ref_png
+    res_i2v = nodes.TencentVODH3ImageToVideo().generate("首尾帧路径测试", **p_i2v)
+    check("path: i2v flow returns", res_i2v[0] == "t-i2v-path1" and res_i2v[2].endswith("out.mp4"), res_i2v)
+    fis = captured_i2v["payload"]["FileInfos"]
+    check("path: i2v FirstFrame FileInfo", len(fis) == 1 and fis[0]["Usage"] == "FirstFrame"
+          and fis[0]["Category"] == "Image" and fis[0]["Type"] == "Base64", str(fis))
+    check("path: i2v b64 content matches file", fis[0]["Base64"] == _b64.b64encode(b"\x89PNG fake bytes").decode())
+finally:
+    nodes._call_api = orig_call_p
+    nodes._download_video = orig_dl_p
+
+# 23.4 参考生视频：ref_image_paths 全流程（与 URL/IMAGE 可并存）
+captured_r2v = {}
+orig_call_p2 = nodes._call_api
+orig_dl_p2 = nodes._download_video
+def fake_r2v_path_call(sid, sk, reg, ep, action, payload, version="", service=""):
+    if action == "CreateAigcVideoTask":
+        captured_r2v["payload"] = payload
+        return {"TaskId": "t-r2v-path1"}
+    return {"TaskType": "AigcVideoTask", "Status": "FINISH",
+            "AigcVideoTask": {"Status": "FINISH", "Output": {"FileInfos": [
+                {"FileUrl": "https://cdn/out.mp4"}]}}}
+nodes._call_api = fake_r2v_path_call
+nodes._download_video = lambda url, task_id, on_progress=None, name_hint=None: "/tmp/comfy_output/vod_aigc/out.mp4"
+try:
+    p_r2v = dict(params)
+    p_r2v["ref_image_paths"] = ref_png + "\n" + ref_png
+    p_r2v["ref_image_urls"] = "https://x/a.png"
+    res_r2v = nodes.TencentVODH3ReferenceToVideo().generate("参考图路径测试", **p_r2v)
+    check("path: r2v flow returns", res_r2v[0] == "t-r2v-path1", res_r2v)
+    fis = captured_r2v["payload"]["FileInfos"]
+    check("path: r2v path+url coexist", len(fis) == 3 and
+          sum(1 for f in fis if f["Usage"] == "Reference" and f["Category"] == "Image") == 3 and
+          sum(1 for f in fis if f["Type"] == "Url") == 1, str(fis))
+finally:
+    nodes._call_api = orig_call_p2
+    nodes._download_video = orig_dl_p2
+
+# 23.5 生图节点：ref_image_paths（FileInfos 无 Category/Usage；台账 mode=i2i）
+ledger_img = []
+orig_append_img = nodes._append_history
+orig_call_p3 = nodes._call_api
+orig_dl_p3 = nodes._download_video
+nodes._append_history = lambda rec: ledger_img.append(rec)
+captured_imgp = {}
+def fake_img_path_call(sid, sk, reg, ep, action, payload, version="", service=""):
+    if action == "CreateAigcImageTask":
+        captured_imgp["payload"] = payload
+        return {"TaskId": "t-img-path1"}
+    return {"TaskType": "AigcImageTask", "Status": "FINISH",
+            "AigcImageTask": {"Status": "FINISH", "Output": {"FileInfos": [
+                {"FileUrl": "https://cdn/o.png"}]}}}
+nodes._call_api = fake_img_path_call
+nodes._download_video = lambda url, task_id, on_progress=None, name_hint=None: "/tmp/comfy_output/vod_aigc/o.png"
+try:
+    p_imgp = dict(img_params)
+    p_imgp["ref_image_paths"] = ref_png
+    p_imgp["use_cache"] = "Disabled"
+    res_imgp = nodes.TencentVODAIGCImageTask().generate("图生图路径测试", **p_imgp)
+    fis = captured_imgp["payload"]["FileInfos"]
+    check("path: image node FileInfo no Category/Usage", len(fis) == 1 and fis[0]["Type"] == "Base64"
+          and "Category" not in fis[0] and "Usage" not in fis[0], str(fis))
+    check("path: image node ledger mode=i2i", ledger_img and ledger_img[-1]["mode"] == "i2i",
+          str(ledger_img[-1].get("mode") if ledger_img else None))
+finally:
+    nodes._append_history = orig_append_img
+    nodes._call_api = orig_call_p3
+    nodes._download_video = orig_dl_p3
+
+# 23.6 缓存键包含路径参数
+ck_p1 = nodes._cache_key("r2v", "p", {"ref_image_paths": "input/a.png"})
+ck_p2 = nodes._cache_key("r2v", "p", {"ref_image_urls": "https://x/a.png"})
+ck_p3 = nodes._cache_key("r2v", "p", {"ref_image_paths": "input/b.png"})
+check("cache: ref_image_paths in key", len({ck_p1, ck_p2, ck_p3}) == 3)
+ck_p4 = nodes._cache_key("i2v", "p", {"first_frame_path": "input/a.png"})
+ck_p5 = nodes._cache_key("i2v", "p", {"first_frame_url": "https://x/a.png"})
+ck_p6 = nodes._cache_key("i2v", "p", {"last_frame_path": "input/a.png"})
+check("cache: first/last_frame_path in key", len({ck_p4, ck_p5, ck_p6}) == 3)
+
+
+# ---- 24. MPS 音乐生成节点（v1.14.0）----
+music_inputs = nodes.TencentVODAIGCMusicTask.INPUT_TYPES()
+check("music: model dropdown", nodes.TencentVODAIGCMusicTask._MUSIC_MODELS ==
+      ["GL 2.0", "GL 3.0-clip", "GL 3.0-pro", "MiniMaxMusic 2.0", "MiniMaxMusic 2.5", "MiniMaxMusic 2.6"])
+check("music: prompt/lyrics multiline", music_inputs["required"]["prompt"][1].get("multiline")
+      and music_inputs["optional"]["lyrics"][1].get("multiline"))
+check("music: endpoint default mps", music_inputs["optional"]["endpoint"][1]["default"] == "mps.tencentcloudapi.com")
+
+# 24.1 签名 version / service 参数
+h_mps, _b = nodes._sign_request("AKIDt", "sk", "ap-guangzhou", "mps.tencentcloudapi.com",
+                                "CreateAigcAudioTask", {"Prompt": "p"}, version="2019-06-12", service="mps")
+check("music: X-TC-Version=2019-06-12", h_mps["X-TC-Version"] == "2019-06-12")
+check("music: credential scope /mps/", "/mps/tc3_request" in h_mps["Authorization"], h_mps["Authorization"][:120])
+h_vod, _b2 = nodes._sign_request("a", "b", "", "vod.tencentcloudapi.com", "DescribeTaskDetail", {"TaskId": "t"})
+check("music: default version stays vod", h_vod["X-TC-Version"] == "2018-07-17" and "/vod/tc3_request" in h_vod["Authorization"])
+
+# 24.2 payload 构造：歌词 / 纯音乐 / GL / 参考音频 / 无 SubAppId
+p_lyric = nodes._build_music_payload("一首歌", "MiniMaxMusic 2.6",
+                                     {"additional_parameters": json.dumps({"lyric": "啦啦啦"}, ensure_ascii=False),
+                                      "output_format": "mp3"})
+check("music: payload lyric form", p_lyric["ModelName"] == "MiniMaxMusic" and p_lyric["ModelVersion"] == "2.6"
+      and p_lyric["SceneType"] == "music"
+      and json.loads(p_lyric["AdditionalParameters"]) == {"lyric": "啦啦啦"}
+      and p_lyric["OutputAudioFormat"] == "mp3", str(p_lyric))
+p_inst = nodes._build_music_payload("纯音乐", "MiniMaxMusic 2.6",
+                                    {"additional_parameters": '{"is_instrumental": true}', "output_format": ""})
+check("music: payload instrumental form", json.loads(p_inst["AdditionalParameters"]) == {"is_instrumental": True}
+      and "OutputAudioFormat" not in p_inst, str(p_inst))
+p_gl = nodes._build_music_payload("p", "GL 3.0-pro", {"additional_parameters": "", "output_format": ""})
+check("music: GL model parse", p_gl["ModelName"] == "GL" and p_gl["ModelVersion"] == "3.0-pro"
+      and "AdditionalParameters" not in p_gl, str(p_gl))
+p_ref = nodes._build_music_payload("p", "MiniMaxMusic 2.0", {"additional_parameters": "", "output_format": ""},
+                                   file_infos=[{"Type": "Url", "Url": "https://x/a.mp3"}])
+check("music: AudioInfos passed, no SubAppId", p_ref["AudioInfos"][0]["Url"] == "https://x/a.mp3"
+      and "SubAppId" not in p_ref, str(p_ref))
+
+# 24.3 AigcAudioTask 结果解析：平铺（AudioInfos[].Url）与嵌套（AigcAudioTask 键）
+flat_audio = {"Status": "DONE", "AudioInfos": [{"Url": "https://cdn/song.mp3", "Duration": 120}], "RequestId": "r1"}
+st, _, _, _, urls = nodes._extract_task_result(flat_audio)
+check("music: flat DONE parsed", st == "DONE" and urls == ["https://cdn/song.mp3"], str(urls))
+nested_audio = {"TaskType": "AigcAudioTask", "Status": "RUN",
+                "AigcAudioTask": {"Status": "DONE", "Output": {"AudioInfos": [{"Url": "https://cdn/s.wav"}]}}}
+st2, _, _, _, urls2 = nodes._extract_task_result(nested_audio)
+check("music: nested AigcAudioTask parsed", st2 == "DONE" and urls2 == ["https://cdn/s.wav"], str(urls2))
+fail_audio = {"Status": "FAIL", "Message": "tme audio url is empty"}
+st3, _, _, msg3, urls3 = nodes._extract_task_result(fail_audio)
+check("music: flat FAIL parsed", st3 == "FAIL" and msg3 == "tme audio url is empty" and urls3 == [])
+
+# 24.4 轮询：MPS action/version/查询无 SubAppId、DONE 判定完成
+music_calls = []
+orig_call_m = nodes._call_api
+orig_dl_m = nodes._download_video
+def fake_music_api(sid, sk, reg, ep, action, payload, version="", service=""):
+    music_calls.append({"action": action, "version": version, "service": service, "payload": payload})
+    if action == "CreateAigcAudioTask":
+        return {"TaskId": "24000145-AigcAudio-abcdef0t"}
+    return {"Status": "DONE", "AudioInfos": [{"Url": "https://cdn/song.mp3", "Duration": 120}]}
+nodes._call_api = fake_music_api
+nodes._download_video = lambda url, task_id, on_progress=None, name_hint=None: "/tmp/comfy_output/vod_aigc/song_abcf.mp3"
+try:
+    res_m = nodes.TencentVODAIGCMusicTask().generate(
+        "轻快的钢琴曲", secret_id="AKIDx", secret_key="sk", model="MiniMaxMusic 2.6",
+        is_instrumental="Enabled", output_format="mp3", poll_interval=3, timeout=60, use_cache="Disabled")
+    check("music: flow returns tuple", res_m == ("24000145-AigcAudio-abcdef0t",
+                                                 "https://cdn/song.mp3", "/tmp/comfy_output/vod_aigc/song_abcf.mp3"), res_m)
+    create = music_calls[0]
+    check("music: create action/version/service", create["action"] == "CreateAigcAudioTask"
+          and create["version"] == nodes.MPS_API_VERSION and create["service"] == "mps"
+          and create["payload"]["SceneType"] == "music"
+          and json.loads(create["payload"]["AdditionalParameters"]) == {"is_instrumental": True}
+          and "SubAppId" not in create["payload"], str(create))
+    describe = music_calls[-1]
+    check("music: describe query no SubAppId", describe["action"] == "DescribeAigcAudioTask"
+          and describe["version"] == "2019-06-12"
+          and describe["payload"] == {"TaskId": "24000145-AigcAudio-abcdef0t"}, str(describe))
+finally:
+    nodes._call_api = orig_call_m
+    nodes._download_video = orig_dl_m
+
+# 24.5 歌词与纯音乐互斥、Prompt ≤2000
+try:
+    nodes.TencentVODAIGCMusicTask().generate("p", secret_id="AKIDx", secret_key="sk",
+                                             lyrics="歌词", is_instrumental="Enabled",
+                                             poll_interval=3, timeout=60, use_cache="Disabled")
+    check("music: lyrics+instrumental conflict", False)
+except ValueError as e:
+    check("music: lyrics+instrumental conflict", "互斥" in str(e), str(e))
+try:
+    nodes.TencentVODAIGCMusicTask().generate("长" * 2001, secret_id="AKIDx", secret_key="sk",
+                                             poll_interval=3, timeout=60, use_cache="Disabled")
+    check("music: prompt>2000 rejected", False)
+except ValueError as e:
+    check("music: prompt>2000 rejected", "2000" in str(e), str(e))
+
+# 24.6 台账 t2a：不计秒不计费，url/path 照记；视频计费逻辑不受影响
+rec_t2a = nodes._base_record("t2a", "音乐", {"model": "MiniMaxMusic 2.6"})
+check("music: ledger t2a no billing", rec_t2a["seconds_billed"] == 0 and rec_t2a["estimated_cost"] == 0.0
+      and rec_t2a["model"] == "MiniMaxMusic 2.6" and rec_t2a["image_count"] == 0, str(rec_t2a))
+rec_t2v = nodes._base_record("t2v", "视频", {"resolution": "1080P", "duration": 8})
+check("music: video billing unchanged", rec_t2v["seconds_billed"] == 8, str(rec_t2v))
+# 查看节点 t2a 显示
+rec_t2a2 = nodes._base_record("t2a", "音乐测试", {"model": "MiniMaxMusic 2.6"},
+                              task_id="t-view-music", url="https://cdn/song.mp3",
+                              path="/tmp/comfy_output/vod_aigc/song.mp3")
+rec_t2a2["time"] = "2026-08-17T10:00:00+0800"
+with open(hpath, "a", encoding="utf-8") as f:
+    f.write(json.dumps(rec_t2a2, ensure_ascii=False) + "\n")
+vres_m = nodes.TencentVODAIGCViewHistory().view()
+check("music: viewer shows t2a row", "t2a" in vres_m["result"][0] and "音乐测试" in vres_m["result"][0],
+      vres_m["result"][0][-200:])
+
+# 24.7 音乐节点缓存键：歌词/纯音乐/参考音频参与
+ck_m1 = nodes._cache_key("t2a", "p", {"model": "MiniMaxMusic 2.6", "lyrics": "词A", "is_instrumental": "Disabled"})
+ck_m2 = nodes._cache_key("t2a", "p", {"model": "MiniMaxMusic 2.6", "lyrics": "词B", "is_instrumental": "Disabled"})
+ck_m3 = nodes._cache_key("t2a", "p", {"model": "MiniMaxMusic 2.6", "lyrics": "词A", "is_instrumental": "Enabled"})
+ck_m4 = nodes._cache_key("t2a", "p", {"model": "MiniMaxMusic 2.6", "lyrics": "词A", "is_instrumental": "Disabled",
+                                      "ref_audio_paths": "input/a.mp3"})
+check("music: lyrics/instrumental/ref_audio in key", len({ck_m1, ck_m2, ck_m3, ck_m4}) == 4)
+
+
 # ---- 汇总 ----
 print()
 print()
@@ -557,7 +809,7 @@ captured3 = {}
 dl_calls = []
 orig_dl3 = nodes._download_video
 nodes._download_video = lambda url, task_id, on_progress=None, name_hint=None: (dl_calls.append(url) or "/tmp/g.png")
-def fake_img_call3(secret_id, secret_key, region, endpoint, action, payload):
+def fake_img_call3(secret_id, secret_key, region, endpoint, action, payload, version="", service=""):
     if action == "CreateAigcImageTask":
         return {"TaskId": "1500044236-AigcImageTask-multi01t"}
     return {"TaskType": "AigcImageTask", "Status": "FINISH",

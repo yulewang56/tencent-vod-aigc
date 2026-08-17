@@ -1,5 +1,21 @@
 # Changelog
 
+## [v1.14.0] - 2026-08-17
+
+### Added
+- **图片本地路径输入**：多模态参考生视频（`ref_image_paths`）、首/尾帧图生视频（`first_frame_path` / `last_frame_path`）、
+  生图节点（`ref_image_paths`）新增本地图片路径输入（每行一个，最多 9 张；与 IMAGE/URL 输入可并存，
+  总数上限校验不变）。路径经 `~/`、`input/`、`output/` 解析后 Base64 上传（30MB 上限），
+  并按白名单校验扩展名（.jpg/.jpeg/.png/.webp/.bmp，视频/音频路径同样补上校验）；
+  路径素材参与结果缓存键（同参数复用产物）
+- **AI 音乐生成节点**（`腾讯云 AIGC - 音乐生成 (MPS)`）：MPS `CreateAigcAudioTask` / `DescribeAigcAudioTask`
+  （API 版本 2019-06-12，域名 mps.tencentcloudapi.com）。模型 GL 2.0 / 3.0-clip / 3.0-pro 与
+  MiniMaxMusic 2.0 / 2.5 / 2.6；支持歌词（`AdditionalParameters.lyric`）与纯音乐（`is_instrumental`）、
+  参考音频（路径/URL）、mp3/wav 输出、结果缓存；MPS 无 SubAppId，凭据仅需 SecretId/SecretKey。
+  台账新增 `t2a` 模式（不计秒不计费，查看节点显示「音乐」行）；`_sign_request` / `_call_api` /
+  `_wait_for_task` 支持 version / service / action 参数（默认保持 VOD 配置，向后兼容）；
+  附端到端验证脚本 `e2e_music.py`（真实调用需已配置 tencent-vod-config.json）
+
 ## [v1.13.0] - 2026-08-16
 
 ### Added
