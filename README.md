@@ -93,6 +93,7 @@ cp tencent-vod-config.example.json tencent-vod-config.json
 - **audio_generation**：是否生成原生音频
 - **storage_mode**：Temporary（URL 限时有效）/ Permanent（永久存储，可后续做超分增强，推荐生产用）
 - **enhance_prompt**：是否启用 H3-Context-IR 提示词增强（未开源、仅 API 的模块）
+- **use_cache**：结果缓存开关（默认 Enabled）。命中条件：提示词、分辨率、时长、参考素材等全部参数与历史**已成功**任务完全一致，且本地产物文件仍存在 → 直接复用本地产物（零 API 调用、零费用），台账记 `cached: true`；失败任务永不参与命中，产物丢失自动失效。需要新结果时改为 Disabled 或修改任一参数
 - **input_region**：素材 URL 在海外时填 `oversea`（避免拉取失败）
 - **endpoint**：默认 `vod.tencentcloudapi.com`；如已切换新版网关可填 `gateway.vod-qcloud.com`
 
@@ -116,17 +117,6 @@ VOD AIGC - H3 图生视频（first_frame ← Load Image 输出）
     ↓ video_path
 VideoHelperSuite / 其他视频节点 → 后处理
 ```
-
-## 结果缓存（v1.13.0）
-
-生成节点（H3 文生/图生/参考生、生图）新增 `use_cache` 参数（默认 Enabled）：
-
-- **命中条件**：提示词、分辨率、时长、参考素材等全部参数与历史**已成功**任务完全一致，且本地产物文件仍存在
-- **命中行为**：直接复用本地产物，**零腾讯云 API 调用、零费用**；台账新增一条 `cached: true` 记录
-- **强制新结果**：改 `use_cache` 为 Disabled，或修改任一参数（prompt/分辨率/参考素材等）
-- **安全边界**：产物文件被删除/移动后自动失效（允许重新生成）；失败任务永不参与命中
-
-这是自动化管线的确定性基石：单分镜定稿后，同参数重跑永远拿到同一份产物，且不重复扣费。
 
 ## 常见错误
 
