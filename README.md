@@ -1,18 +1,21 @@
 # tencent-vod-aigc
 
-ComfyUI 自定义节点：通过**腾讯云 VOD AIGC** 聚合服务调用 **MiniMax Hailuo H3** 生视频模型。
+ComfyUI 自定义节点：通过**腾讯云 VOD AIGC** 聚合服务调用 **MiniMax Hailuo H3** 生视频模型，
+另含 **MPS AI 音乐生成**（GL / MiniMaxMusic）。
 
-协议为腾讯云 API v3（TC3-HMAC-SHA256 签名，`CreateAigcVideoTask` / `DescribeTaskDetail`），
-对应《VOD AIGC服务接入指南》3.17 节。**纯标准库实现，无需额外 pip 安装**。
+协议为腾讯云 API v3（TC3-HMAC-SHA256 签名，`CreateAigcVideoTask` / `DescribeTaskDetail`，
+音乐为 MPS `CreateAigcAudioTask` / `DescribeAigcAudioTask`），对应《VOD AIGC服务接入指南》3.17 节。
+**纯标准库实现，无需额外 pip 安装**。
 
 ## 节点列表（菜单分类：Tencent VOD AIGC）
 
 | 节点 | 功能 |
 |---|---|
 | `VOD AIGC - H3 文生视频` | 仅提示词生成视频 |
-| `VOD AIGC - H3 图生视频（首/尾帧）` | 首帧 / 尾帧 / 首尾帧生视频，支持 ComfyUI IMAGE 或图片 URL |
+| `VOD AIGC - H3 图生视频（首/尾帧）` | 首帧 / 尾帧 / 首尾帧生视频，支持 ComfyUI IMAGE、图片 URL 或本地图片路径 |
 | `VOD AIGC - H3 多模态参考生视频` | ≤9 图 + ≤3 视频 + ≤3 音频（总数 ≤12），支持本地文件或 URL |
-| `VOD AIGC - 文生图/图生图` | 生图：GEM / Jimeng（3.3.2）+ GPT-Image2（3.14，OG image2_low/medium/high），支持多图输出（1-8 张）、输出格式，可接 ComfyUI 图像或参考图 URL；`preview_image` 输出 IMAGE 张量（原生预览 + 可接下游） |
+| `VOD AIGC - 文生图/图生图` | 生图：GEM / Jimeng（3.3.2）+ GPT-Image2（3.14，OG image2_low/medium/high），支持多图输出（1-8 张）、输出格式，可接 ComfyUI 图像、本地图片路径或参考图 URL；`preview_image` 输出 IMAGE 张量（原生预览 + 可接下游） |
+| `腾讯云 AIGC - 音乐生成 (MPS)` | AI 音乐生成：GL / MiniMaxMusic，支持歌词与纯音乐、参考音频（路径/URL）、mp3/wav 输出 |
 | `VOD AIGC - 查询任务` | 按 TaskId 查状态（超时/失败排查用） |
 | `VOD AIGC - 下载视频` | 按 URL 重新下载视频 |
 | `VOD AIGC - 查看执行台账` | 显示 `output/vod_aigc/execution_history.jsonl` 中的历史记录（右下角浮窗） |
@@ -97,14 +100,27 @@ cp tencent-vod-config.example.json tencent-vod-config.json
 - **input_region**：素材 URL 在海外时填 `oversea`（避免拉取失败）
 - **endpoint**：默认 `vod.tencentcloudapi.com`；如已切换新版网关可填 `gateway.vod-qcloud.com`
 
+### 音乐生成节点（腾讯云 AIGC - 音乐生成 (MPS)）
+
+- **model**：GL 2.0 / GL 3.0-clip / GL 3.0-pro，或 MiniMaxMusic 2.0 / 2.5 / 2.6
+- **prompt**：音乐风格 / 演唱要求描述，≤2000 字符
+- **lyrics**（可选）：歌词文本，换行分段（`AdditionalParameters.lyric`）；**与 is_instrumental 互斥**
+- **is_instrumental**：纯音乐模式（`AdditionalParameters.is_instrumental=true`），与歌词互斥
+- **ref_audio_paths / ref_audio_urls**（可选）：参考音频（生成带参考旋律的音乐），本地路径每行一个或 URL 直链
+- **output_format**：mp3 / wav（留空跟随模型默认）；输出下载到 `output/vod_aigc/`，URL 约 12 小时有效期
+- 接口：MPS `CreateAigcAudioTask` / `DescribeAigcAudioTask`（API 版本 2019-06-12，域名 `mps.tencentcloudapi.com`）；
+  MPS 无 SubAppId，凭据仅需 SecretId / SecretKey；台账 mode 记 `t2a`（不计秒不计费）
+
 ## 素材限制（来自文档，超限节点会直接报错）
 
 - 图片：单张 ≤30MB，宽高 [256, 5760]，比例 5:2~2:5
 - 参考视频：单段 ≤50MB、2–15 秒、总时长 ≤15 秒
 - 参考音频：单段 ≤15MB、2–15 秒，**不能单独输入**，必须配图/视频
-- 本地素材路径支持 `input/`、`output/` 相对前缀（如 `input/ref.mp4`），或绝对路径
+- 本地素材路径支持 `input/`、`output/` 相对前缀（如 `input/ref.mp4`），或绝对路径；
+  路径素材与 URL 素材同样做**扩展名白名单校验**（图片 .jpg/.jpeg/.png/.webp/.bmp，视频 .mp4/.mov，音频 .mp3/.wav/.m4a/.aac），
+  提交前本地报错；路径素材会参与结果缓存键（同参数复用产物）
 - Base64 传参总大小 ≤70MB；混合输入总数 ≤12 个文件
-- Prompt ≤7000 字符
+- 视频 Prompt ≤7000 字符；音乐 Prompt ≤2000 字符
 
 ## 典型用法
 
@@ -132,7 +148,7 @@ VideoHelperSuite / 其他视频节点 → 后处理
 ## 测试
 
 ```bash
-python tests/test_nodes.py        # 113 项自包含测试，无需安装任何依赖（自带 ComfyUI/numpy/PIL stub）
+python tests/test_nodes.py        # 179 项自包含测试，无需安装任何依赖（自带 ComfyUI/numpy/PIL stub）
 ```
 
 ## 更新日志
