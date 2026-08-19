@@ -31,7 +31,8 @@ def check(name, cond, detail=""):
 
 # ---- 1. node registry ----
 expected = ["TencentVODH3TextToVideo", "TencentVODH3ImageToVideo",
-            "TencentVODH3ReferenceToVideo", "TencentVODAIGCImageTask",
+            "TencentVODH3ReferenceToVideo", "TencentVODVSVideoTask",
+            "TencentVODAIGCCreateMaterial", "TencentVODAIGCImageTask",
             "TencentVODAIGCMusicTask", "TencentVODAIGCQueryTask",
             "TencentVODAIGCDownloadVideo", "TencentVODAIGCViewHistory"]
 check("all nodes registered", set(expected) == set(nodes.NODE_CLASS_MAPPINGS),
