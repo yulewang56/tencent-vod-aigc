@@ -22,6 +22,7 @@ import json
 import os
 import urllib.parse
 import urllib.request
+from fractions import Fraction
 
 import numpy as np
 from PIL import Image
@@ -37,6 +38,7 @@ from vod_aigc_core import (
     TaskError,
     _hmac_sha256, _canonical_headers, _sign_request,
     build_video_payload as _build_payload,
+    build_3d_world_payload as _build_3d_world_payload,
     build_image_payload as _build_image_payload,
     build_music_payload as _build_music_payload,
     extract_task_result as _extract_task_result,
@@ -60,6 +62,12 @@ try:
     from comfy import folder_paths
 except ImportError:
     import folder_paths
+
+try:
+    from comfy_api.latest import InputImpl, Types
+except ImportError:
+    InputImpl = None
+    Types = None
 
 
 # ---------------------------------------------------------------- 模块级委托（测试可打桩）
@@ -278,8 +286,849 @@ def _paths_to_image_tensor(paths):
         return None
 
 
+def _file_3d_value(path):
+    """Wrap a local scene asset in ComfyUI's typed FILE_3D value when available."""
+    if not path:
+        return None
+    return Types.File3D(path) if Types is not None else path
+
+
+def _native_video_from_frames(frames, fps):
+    if InputImpl is None or Types is None:
+        raise RuntimeError(
+            "当前 ComfyUI 不提供原生 VIDEO API，请更新 ComfyUI 后再运行 3D 预演节点")
+    return InputImpl.VideoFromComponents(
+        Types.VideoComponents(
+            images=frames, audio=None, frame_rate=Fraction(str(float(fps)))))
+
+
+def _next_previs_video_path(filename_prefix):
+    output_dir = os.path.join(folder_paths.get_output_directory(), "vod_aigc")
+    os.makedirs(output_dir, exist_ok=True)
+    safe_name = os.path.basename(str(filename_prefix or "previs")).strip()
+    safe_name = os.path.splitext(safe_name)[0] or "previs"
+    safe_name = "".join(
+        character if character.isalnum() or character in ("-", "_") else "_"
+        for character in safe_name)
+    counter = 1
+    while True:
+        path = os.path.join(output_dir, f"{safe_name}_{counter:05d}.mp4")
+        if not os.path.exists(path):
+            return path
+        counter += 1
+
+
+_DEFAULT_PREVIS_SCENE = json.dumps({
+    "version": 3,
+    "objects": [
+        {"id": "actor-1", "name": "主角", "type": "actor",
+         "position": [-1.5, 0, 0], "end": [1.5, 0, 0], "scale": [1, 1, 1],
+         "motion": "walk",
+         "motion_track": {
+             "interpolation": "catmull_rom",
+             "speed_mode": "constant",
+             "speed_description": "匀速行走",
+             "speed_curve": [{"x": 0, "y": 0}, {"x": 1, "y": 1}],
+             "points": [
+                 {"time": 0, "position": [-1.5, 0, 0]},
+                 {"time": 0.5, "position": [0, 0, -0.6]},
+                 {"time": 1, "position": [1.5, 0, 0]},
+             ],
+         }},
+        {"id": "box-1", "name": "前景台", "type": "box",
+         "position": [2.2, 0.5, 1.2], "scale": [1.8, 1, 1.8]},
+        {"id": "box-2", "name": "背景体块", "type": "box",
+         "position": [-2.8, 1.2, -3], "scale": [2.5, 2.4, 1.5]},
+    ]
+}, ensure_ascii=False, indent=2)
+
+_DEFAULT_PREVIS_CAMERA = json.dumps({
+    "version": 3,
+    "active_camera": "camera-1",
+    "cameras": [{
+        "id": "camera-1",
+        "name": "主摄影机",
+        "keyframes": [
+            {"time": 0, "position": [7, 4.5, 9], "target": [0, 1, 0], "fov": 48},
+            {"time": 1, "position": [3.5, 2.8, 5.5], "target": [0.5, 1, 0], "fov": 42},
+        ],
+        "position_track": {
+            "interpolation": "catmull_rom",
+            "speed_mode": "ease_in_out",
+            "speed_description": "缓入缓出推进",
+            "speed_curve": [{"x": 0, "y": 0}, {"x": 1, "y": 1}],
+            "points": [
+                {"time": 0, "position": [7, 4.5, 9]},
+                {"time": 1, "position": [3.5, 2.8, 5.5]},
+            ],
+        },
+        "target_track": {
+            "interpolation": "linear",
+            "speed_mode": "keyframed",
+            "speed_curve": [{"x": 0, "y": 0}, {"x": 1, "y": 1}],
+            "points": [
+                {"time": 0, "position": [0, 1, 0]},
+                {"time": 1, "position": [0.5, 1, 0]},
+            ],
+        },
+    }],
+    "cuts": [{"time": 0, "camera_id": "camera-1"}],
+}, ensure_ascii=False, indent=2)
+
+
+def _previs_vec3(value, field):
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        raise ValueError(f"{field} 必须是包含 3 个数字的数组")
+    try:
+        result = [float(v) for v in value]
+    except (TypeError, ValueError):
+        raise ValueError(f"{field} 必须是包含 3 个数字的数组") from None
+    if not all(np.isfinite(result)):
+        raise ValueError(f"{field} 不能包含 NaN 或无穷值")
+    return result
+
+
+_PREVIS_INTERPOLATIONS = {"linear", "catmull_rom", "bezier"}
+_PREVIS_SPEED_MODES = {
+    "keyframed", "constant", "ease_in", "ease_out", "ease_in_out", "custom"}
+
+
+def _previs_track_points(raw_points, field):
+    if not isinstance(raw_points, list) or not raw_points:
+        raise ValueError(f"{field} 必须是非空数组")
+    if len(raw_points) > 32:
+        raise ValueError(f"{field} 最多 32 个轨迹点")
+    points = []
+    for index, point in enumerate(raw_points):
+        if not isinstance(point, dict):
+            raise ValueError(f"{field}[{index}] 必须是对象")
+        try:
+            time_value = float(point.get("time", 0))
+        except (TypeError, ValueError):
+            raise ValueError(f"{field}[{index}].time 必须是数字") from None
+        if not 0 <= time_value <= 1:
+            raise ValueError(f"{field}[{index}].time 必须在 0-1")
+        normalized = {
+            "time": time_value,
+            "position": _previs_vec3(
+                point.get("position"), f"{field}[{index}].position"),
+        }
+        for handle_name in ("in_handle", "out_handle"):
+            if point.get(handle_name) is not None:
+                normalized[handle_name] = _previs_vec3(
+                    point[handle_name], f"{field}[{index}].{handle_name}")
+        points.append(normalized)
+    points.sort(key=lambda point: point["time"])
+    if any(left["time"] >= right["time"] for left, right in zip(points, points[1:])):
+        raise ValueError(f"{field} 的轨迹点时间必须严格递增")
+    return points
+
+
+def _previs_speed_curve(raw_curve, field):
+    curve = raw_curve if raw_curve is not None else [{"x": 0, "y": 0}, {"x": 1, "y": 1}]
+    if not isinstance(curve, list) or len(curve) < 2 or len(curve) > 16:
+        raise ValueError(f"{field} 必须包含 2-16 个控制点")
+    normalized = []
+    for index, point in enumerate(curve):
+        if not isinstance(point, dict):
+            raise ValueError(f"{field}[{index}] 必须是对象")
+        try:
+            x_value = float(point.get("x"))
+            y_value = float(point.get("y"))
+        except (TypeError, ValueError):
+            raise ValueError(f"{field}[{index}] 的 x/y 必须是数字") from None
+        if not 0 <= x_value <= 1 or not 0 <= y_value <= 1:
+            raise ValueError(f"{field}[{index}] 的 x/y 必须在 0-1")
+        normalized.append({"x": x_value, "y": y_value})
+    normalized.sort(key=lambda point: point["x"])
+    if any(left["x"] >= right["x"] for left, right in zip(normalized, normalized[1:])):
+        raise ValueError(f"{field} 的 x 必须严格递增")
+    if normalized[0]["x"] != 0 or normalized[-1]["x"] != 1:
+        raise ValueError(f"{field} 必须从 x=0 开始并在 x=1 结束")
+    if normalized[0]["y"] != 0 or normalized[-1]["y"] != 1:
+        raise ValueError(f"{field} 必须从 y=0 开始并在 y=1 结束")
+    if any(left["y"] > right["y"] for left, right in zip(normalized, normalized[1:])):
+        raise ValueError(f"{field} 的 y 必须单调递增")
+    return normalized
+
+
+def _normalize_previs_track(raw_track, fallback_points, field,
+                            default_speed_mode="keyframed"):
+    track = raw_track if isinstance(raw_track, dict) else {}
+    interpolation = str(track.get("interpolation") or "linear").lower()
+    if interpolation not in _PREVIS_INTERPOLATIONS:
+        raise ValueError(
+            f"{field}.interpolation 不支持 {interpolation}，可选 "
+            f"{'/'.join(sorted(_PREVIS_INTERPOLATIONS))}")
+    speed_mode = str(track.get("speed_mode") or default_speed_mode).lower()
+    if speed_mode not in _PREVIS_SPEED_MODES:
+        raise ValueError(
+            f"{field}.speed_mode 不支持 {speed_mode}，可选 "
+            f"{'/'.join(sorted(_PREVIS_SPEED_MODES))}")
+    points = _previs_track_points(track.get("points", fallback_points), f"{field}.points")
+    if len(points) < 2 and interpolation != "linear":
+        interpolation = "linear"
+    return {
+        "interpolation": interpolation,
+        "speed_mode": speed_mode,
+        "speed_description": str(track.get("speed_description") or "").strip(),
+        "speed_curve": _previs_speed_curve(
+            track.get("speed_curve"), f"{field}.speed_curve"),
+        "points": points,
+    }
+
+
+def _parse_previs_scene(raw):
+    """解析白模场景 JSON，并把 v1/v2 对象轨迹迁移为 V3 track。"""
+    try:
+        data = json.loads(raw or _DEFAULT_PREVIS_SCENE)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"scene_json 不是合法 JSON：第 {e.lineno} 行 {e.msg}") from None
+    objects = data.get("objects") if isinstance(data, dict) else None
+    if not isinstance(objects, list):
+        raise ValueError('scene_json 须为 {"objects": [...]}')
+    if len(objects) > 64:
+        raise ValueError("白模对象最多 64 个")
+    normalized = []
+    for index, item in enumerate(objects):
+        if not isinstance(item, dict):
+            raise ValueError(f"objects[{index}] 必须是对象")
+        kind = str(item.get("type") or "box").lower()
+        if kind not in ("box", "actor", "sphere"):
+            raise ValueError(f"objects[{index}].type 不支持 {kind}，可选 box/actor/sphere")
+        position = _previs_vec3(item.get("position", [0, 0, 0]), f"objects[{index}].position")
+        scale = _previs_vec3(item.get("scale", [1, 1, 1]), f"objects[{index}].scale")
+        rotation = _previs_vec3(
+            item.get("rotation", [0, 0, 0]), f"objects[{index}].rotation")
+        if any(v <= 0 for v in scale):
+            raise ValueError(f"objects[{index}].scale 必须大于 0")
+        end = item.get("end")
+        end_position = (
+            _previs_vec3(end, f"objects[{index}].end") if end is not None else position)
+        raw_path = item.get("path")
+        if raw_path is not None and (not isinstance(raw_path, list) or len(raw_path) < 2):
+            raise ValueError(f"objects[{index}].path 至少需要 2 个轨迹点")
+        fallback_path = raw_path or [
+            {"time": 0.0, "position": position},
+            {"time": 1.0, "position": end_position},
+        ]
+        motion_track = _normalize_previs_track(
+            item.get("motion_track"), fallback_path,
+            f"objects[{index}].motion_track",
+            default_speed_mode="keyframed")
+        path = [
+            {"time": point["time"], "position": list(point["position"])}
+            for point in motion_track["points"]
+        ]
+        position = path[0]["position"]
+        end_position = path[-1]["position"]
+        normalized.append({
+            "id": str(item.get("id") or f"object-{index + 1}"),
+            "name": str(item.get("name") or f"对象 {index + 1}"),
+            "type": kind,
+            "position": position,
+            "end": end_position,
+            "path": path,
+            "motion_track": motion_track,
+            "scale": scale,
+            "rotation": rotation,
+            "motion": str(item.get("motion") or "static").lower(),
+        })
+    return {"version": 3, "objects": normalized}
+
+
+def _parse_previs_keyframes(keyframes, field="keyframes"):
+    if not isinstance(keyframes, list) or not keyframes:
+        raise ValueError(f"{field} 必须是非空数组")
+    if len(keyframes) > 32:
+        raise ValueError(f"{field} 最多 32 个关键帧")
+    normalized = []
+    for index, item in enumerate(keyframes):
+        if not isinstance(item, dict):
+            raise ValueError(f"{field}[{index}] 必须是对象")
+        try:
+            time_value = float(item.get("time", 0))
+            fov = float(item.get("fov", 45))
+            roll = float(item.get("roll", 0))
+        except (TypeError, ValueError):
+            raise ValueError(f"{field}[{index}] 的 time/fov/roll 必须是数字") from None
+        if not 0 <= time_value <= 1:
+            raise ValueError(f"{field}[{index}].time 必须在 0-1")
+        if not 15 <= fov <= 100:
+            raise ValueError(f"{field}[{index}].fov 必须在 15-100")
+        if not -180 <= roll <= 180:
+            raise ValueError(f"{field}[{index}].roll 必须在 -180 到 180")
+        normalized.append({
+            "time": time_value,
+            "position": _previs_vec3(item.get("position", [7, 4, 9]),
+                                      f"{field}[{index}].position"),
+            "target": _previs_vec3(item.get("target", [0, 1, 0]),
+                                    f"{field}[{index}].target"),
+            "fov": fov,
+            "roll": roll,
+        })
+    normalized.sort(key=lambda item: item["time"])
+    if any(left["time"] >= right["time"]
+           for left, right in zip(normalized, normalized[1:])):
+        raise ValueError(f"{field} 的关键帧时间必须严格递增")
+    return normalized
+
+
+def _normalize_previs_fov_track(raw_track, keyframes, field):
+    track = raw_track if isinstance(raw_track, dict) else {}
+    speed_mode = str(track.get("speed_mode") or "keyframed").lower()
+    if speed_mode not in _PREVIS_SPEED_MODES:
+        raise ValueError(f"{field}.speed_mode 不支持 {speed_mode}")
+    raw_points = track.get("points")
+    if raw_points is None:
+        raw_points = [{"time": item["time"], "value": item["fov"]} for item in keyframes]
+    if not isinstance(raw_points, list) or not raw_points:
+        raise ValueError(f"{field}.points 必须是非空数组")
+    if len(raw_points) > 32:
+        raise ValueError(f"{field}.points 最多 32 个关键帧")
+    points = []
+    for index, point in enumerate(raw_points):
+        if not isinstance(point, dict):
+            raise ValueError(f"{field}.points[{index}] 必须是对象")
+        try:
+            time_value = float(point.get("time", 0))
+            fov = float(point.get("value", point.get("fov", 45)))
+        except (TypeError, ValueError):
+            raise ValueError(f"{field}.points[{index}] 的 time/value 必须是数字") from None
+        if not 0 <= time_value <= 1:
+            raise ValueError(f"{field}.points[{index}].time 必须在 0-1")
+        if not 15 <= fov <= 100:
+            raise ValueError(f"{field}.points[{index}].value 必须在 15-100")
+        points.append({"time": time_value, "value": fov})
+    points.sort(key=lambda point: point["time"])
+    if any(left["time"] >= right["time"] for left, right in zip(points, points[1:])):
+        raise ValueError(f"{field}.points 的时间必须严格递增")
+    return {
+        "interpolation": "linear",
+        "speed_mode": speed_mode,
+        "speed_description": str(track.get("speed_description") or "").strip(),
+        "speed_curve": _previs_speed_curve(
+            track.get("speed_curve"), f"{field}.speed_curve"),
+        "points": points,
+    }
+
+
+def _previs_camera_tracks(camera, keyframes, field):
+    position_points = [
+        {"time": item["time"], "position": item["position"]} for item in keyframes]
+    target_points = [
+        {"time": item["time"], "position": item["target"]} for item in keyframes]
+    return (
+        _normalize_previs_track(
+            camera.get("position_track"), position_points, f"{field}.position_track"),
+        _normalize_previs_track(
+            camera.get("target_track"), target_points, f"{field}.target_track"),
+        _normalize_previs_fov_track(
+            camera.get("fov_track"), keyframes, f"{field}.fov_track"),
+    )
+
+
+def _parse_previs_camera(raw):
+    """解析摄影机方案；兼容 v1/v2 keyframes，并规范化为 V3 tracks。"""
+    try:
+        data = json.loads(raw or _DEFAULT_PREVIS_CAMERA)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"camera_json 不是合法 JSON：第 {e.lineno} 行 {e.msg}") from None
+    if not isinstance(data, dict):
+        raise ValueError("camera_json 必须是对象")
+
+    # v1 工作流只有顶层 keyframes；加载时无损迁移为单摄影机 V3。
+    if "cameras" not in data:
+        keyframes = _parse_previs_keyframes(data.get("keyframes"), "keyframes")
+        camera = {"id": "camera-1", "name": "主摄影机", "keyframes": keyframes}
+        position_track, target_track, fov_track = _previs_camera_tracks(
+            camera, keyframes, "camera")
+        camera.update({
+            "position_track": position_track,
+            "target_track": target_track,
+            "fov_track": fov_track,
+        })
+        return {
+            "version": 3,
+            "active_camera": "camera-1",
+            "cameras": [camera],
+            "cuts": [{"time": 0.0, "camera_id": "camera-1"}],
+        }
+
+    cameras = data.get("cameras")
+    if not isinstance(cameras, list) or not cameras:
+        raise ValueError("camera_json.cameras 必须是非空数组")
+    if len(cameras) > 8:
+        raise ValueError("摄影机方案最多 8 台摄影机")
+    normalized_cameras = []
+    camera_ids = set()
+    for index, camera in enumerate(cameras):
+        if not isinstance(camera, dict):
+            raise ValueError(f"cameras[{index}] 必须是对象")
+        camera_id = str(camera.get("id") or f"camera-{index + 1}").strip()
+        if not camera_id:
+            raise ValueError(f"cameras[{index}].id 不能为空")
+        if camera_id in camera_ids:
+            raise ValueError(f"摄影机 id 重复：{camera_id}")
+        camera_ids.add(camera_id)
+        keyframes = _parse_previs_keyframes(
+            camera.get("keyframes"), f"cameras[{index}].keyframes")
+        position_track, target_track, fov_track = _previs_camera_tracks(
+            camera, keyframes, f"cameras[{index}]")
+        normalized_cameras.append({
+            "id": camera_id,
+            "name": str(camera.get("name") or f"摄影机 {index + 1}"),
+            "keyframes": keyframes,
+            "position_track": position_track,
+            "target_track": target_track,
+            "fov_track": fov_track,
+        })
+
+    active_camera = str(data.get("active_camera") or normalized_cameras[0]["id"])
+    if active_camera not in camera_ids:
+        raise ValueError(f"active_camera 不存在：{active_camera}")
+
+    cuts = data.get("cuts") or []
+    if not isinstance(cuts, list):
+        raise ValueError("camera_json.cuts 必须是数组")
+    if len(cuts) > 64:
+        raise ValueError("切镜点最多 64 个")
+    normalized_cuts = []
+    for index, cut in enumerate(cuts):
+        if not isinstance(cut, dict):
+            raise ValueError(f"cuts[{index}] 必须是对象")
+        try:
+            time_value = float(cut.get("time", 0))
+        except (TypeError, ValueError):
+            raise ValueError(f"cuts[{index}].time 必须是数字") from None
+        if not 0 <= time_value <= 1:
+            raise ValueError(f"cuts[{index}].time 必须在 0-1")
+        camera_id = str(cut.get("camera_id") or "")
+        if camera_id not in camera_ids:
+            raise ValueError(f"cuts[{index}].camera_id 不存在：{camera_id}")
+        normalized_cuts.append({"time": time_value, "camera_id": camera_id})
+    cuts_by_time = {cut["time"]: cut for cut in normalized_cuts}
+    normalized_cuts = sorted(cuts_by_time.values(), key=lambda item: item["time"])
+    if not normalized_cuts or normalized_cuts[0]["time"] > 0:
+        normalized_cuts.insert(0, {"time": 0.0, "camera_id": active_camera})
+    elif normalized_cuts[0]["time"] == 0:
+        active_camera = normalized_cuts[0]["camera_id"]
+
+    return {
+        "version": 3,
+        "active_camera": active_camera,
+        "cameras": normalized_cameras,
+        "cuts": normalized_cuts,
+    }
+
+
+def _previs_lerp(a, b, amount):
+    return [x + (y - x) * amount for x, y in zip(a, b)]
+
+
+def _previs_track_raw_at(track, time_value):
+    points = track["points"]
+    if len(points) == 1 or time_value <= points[0]["time"]:
+        return list(points[0]["position"])
+    if time_value >= points[-1]["time"]:
+        return list(points[-1]["position"])
+    segment_index = len(points) - 2
+    for index, (left, right) in enumerate(zip(points, points[1:])):
+        if left["time"] <= time_value <= right["time"]:
+            segment_index = index
+            break
+    left, right = points[segment_index], points[segment_index + 1]
+    amount = (time_value - left["time"]) / max(1e-9, right["time"] - left["time"])
+    interpolation = track.get("interpolation", "linear")
+    if interpolation == "linear":
+        return _previs_lerp(left["position"], right["position"], amount)
+    p1 = np.asarray(left["position"], dtype=np.float64)
+    p2 = np.asarray(right["position"], dtype=np.float64)
+    if interpolation == "bezier":
+        delta = p2 - p1
+        c1 = np.asarray(left.get("out_handle", (p1 + delta / 3).tolist()),
+                        dtype=np.float64)
+        c2 = np.asarray(right.get("in_handle", (p2 - delta / 3).tolist()),
+                        dtype=np.float64)
+        inverse = 1 - amount
+        value = (
+            inverse ** 3 * p1
+            + 3 * inverse ** 2 * amount * c1
+            + 3 * inverse * amount ** 2 * c2
+            + amount ** 3 * p2
+        )
+        return value.tolist()
+    p0 = np.asarray(
+        points[max(0, segment_index - 1)]["position"], dtype=np.float64)
+    p3 = np.asarray(
+        points[min(len(points) - 1, segment_index + 2)]["position"], dtype=np.float64)
+    amount2, amount3 = amount * amount, amount * amount * amount
+    value = 0.5 * (
+        2 * p1
+        + (-p0 + p2) * amount
+        + (2 * p0 - 5 * p1 + 4 * p2 - p3) * amount2
+        + (-p0 + 3 * p1 - 3 * p2 + p3) * amount3
+    )
+    return value.tolist()
+
+
+def _previs_curve_value(curve, progress):
+    if progress <= curve[0]["x"]:
+        return curve[0]["y"]
+    if progress >= curve[-1]["x"]:
+        return curve[-1]["y"]
+    for left, right in zip(curve, curve[1:]):
+        if left["x"] <= progress <= right["x"]:
+            amount = (progress - left["x"]) / max(1e-9, right["x"] - left["x"])
+            return left["y"] + (right["y"] - left["y"]) * amount
+    return progress
+
+
+def _previs_speed_progress(track, progress):
+    progress = min(1.0, max(0.0, progress))
+    mode = track.get("speed_mode", "keyframed")
+    if mode in ("keyframed", "constant"):
+        return progress
+    if mode == "ease_in":
+        return progress * progress
+    if mode == "ease_out":
+        return 1 - (1 - progress) * (1 - progress)
+    if mode == "ease_in_out":
+        return (
+            2 * progress * progress
+            if progress < 0.5 else 1 - ((-2 * progress + 2) ** 2) / 2)
+    return _previs_curve_value(track["speed_curve"], progress)
+
+
+@functools.lru_cache(maxsize=256)
+def _previs_arc_lut(track_json):
+    track = json.loads(track_json)
+    points = track["points"]
+    start, end = points[0]["time"], points[-1]["time"]
+    sample_count = max(32, min(256, len(points) * 32))
+    times = [
+        start + (end - start) * index / sample_count
+        for index in range(sample_count + 1)
+    ]
+    positions = [
+        np.asarray(_previs_track_raw_at(track, time_value), dtype=np.float64)
+        for time_value in times
+    ]
+    distances = [0.0]
+    for left, right in zip(positions, positions[1:]):
+        distances.append(distances[-1] + float(np.linalg.norm(right - left)))
+    total = distances[-1]
+    fractions = [distance / total for distance in distances] if total > 1e-9 else [
+        index / sample_count for index in range(sample_count + 1)]
+    return tuple(times), tuple(fractions)
+
+
+def _previs_track_at(track, time_value):
+    points = track["points"]
+    start, end = points[0]["time"], points[-1]["time"]
+    if len(points) == 1 or time_value <= start:
+        return list(points[0]["position"])
+    if time_value >= end:
+        return list(points[-1]["position"])
+    if track.get("speed_mode", "keyframed") == "keyframed":
+        return _previs_track_raw_at(track, time_value)
+    progress = (time_value - start) / max(1e-9, end - start)
+    distance_progress = _previs_speed_progress(track, progress)
+    track_json = json.dumps(
+        {
+            "interpolation": track.get("interpolation", "linear"),
+            "points": track["points"],
+        },
+        sort_keys=True, separators=(",", ":"))
+    times, fractions = _previs_arc_lut(track_json)
+    raw_time = times[-1]
+    for index, (left, right) in enumerate(zip(fractions, fractions[1:])):
+        if left <= distance_progress <= right:
+            amount = (distance_progress - left) / max(1e-9, right - left)
+            raw_time = times[index] + (times[index + 1] - times[index]) * amount
+            break
+    return _previs_track_raw_at(track, raw_time)
+
+
+def _previs_scalar_track_at(track, time_value):
+    points = track["points"]
+    if len(points) == 1 or time_value <= points[0]["time"]:
+        return points[0]["value"]
+    if time_value >= points[-1]["time"]:
+        return points[-1]["value"]
+    if track.get("speed_mode", "keyframed") != "keyframed":
+        start, end = points[0]["time"], points[-1]["time"]
+        progress = _previs_speed_progress(
+            track, (time_value - start) / max(1e-9, end - start))
+        time_value = start + (end - start) * progress
+    for left, right in zip(points, points[1:]):
+        if left["time"] <= time_value <= right["time"]:
+            amount = (time_value - left["time"]) / max(
+                1e-9, right["time"] - left["time"])
+            return left["value"] + (right["value"] - left["value"]) * amount
+    return points[-1]["value"]
+
+
+def _previs_camera_for_time(camera_plan, time_value):
+    """按 cuts 选择当前摄影机；无切镜时使用 active_camera。"""
+    cameras = camera_plan["cameras"]
+    camera_id = camera_plan.get("active_camera") or cameras[0]["id"]
+    for cut in camera_plan.get("cuts", []):
+        if cut["time"] <= time_value:
+            camera_id = cut["camera_id"]
+        else:
+            break
+    return next((camera for camera in cameras if camera["id"] == camera_id), cameras[0])
+
+
+def _previs_camera_at(camera, time_value):
+    rig = _previs_camera_for_time(camera, time_value) if "cameras" in camera else camera
+    if all(name in rig for name in ("position_track", "target_track", "fov_track")):
+        roll_frames = rig["keyframes"]
+        if time_value <= roll_frames[0]["time"]:
+            roll = roll_frames[0].get("roll", 0.0)
+        elif time_value >= roll_frames[-1]["time"]:
+            roll = roll_frames[-1].get("roll", 0.0)
+        else:
+            roll = roll_frames[-1].get("roll", 0.0)
+            for left, right in zip(roll_frames, roll_frames[1:]):
+                if left["time"] <= time_value <= right["time"]:
+                    amount = (time_value - left["time"]) / max(
+                        1e-9, right["time"] - left["time"])
+                    roll = left.get("roll", 0.0) + (
+                        right.get("roll", 0.0) - left.get("roll", 0.0)) * amount
+                    break
+        return {
+            "time": time_value,
+            "position": _previs_track_at(rig["position_track"], time_value),
+            "target": _previs_track_at(rig["target_track"], time_value),
+            "fov": _previs_scalar_track_at(rig["fov_track"], time_value),
+            "roll": roll,
+        }
+    frames = rig["keyframes"]
+    if time_value <= frames[0]["time"]:
+        return dict(frames[0])
+    if time_value >= frames[-1]["time"]:
+        return dict(frames[-1])
+    for left, right in zip(frames, frames[1:]):
+        if left["time"] <= time_value <= right["time"]:
+            span = max(1e-9, right["time"] - left["time"])
+            amount = (time_value - left["time"]) / span
+            return {
+                "time": time_value,
+                "position": _previs_lerp(left["position"], right["position"], amount),
+                "target": _previs_lerp(left["target"], right["target"], amount),
+                "fov": left["fov"] + (right["fov"] - left["fov"]) * amount,
+                "roll": left.get("roll", 0.0)
+                        + (right.get("roll", 0.0) - left.get("roll", 0.0)) * amount,
+            }
+    return dict(frames[-1])
+
+
+def _previs_project(point, camera, width, height):
+    position = np.asarray(camera["position"], dtype=np.float64)
+    target = np.asarray(camera["target"], dtype=np.float64)
+    forward = target - position
+    length = np.linalg.norm(forward)
+    if length < 1e-6:
+        forward = np.asarray([0.0, 0.0, -1.0])
+    else:
+        forward /= length
+    right = np.cross(forward, np.asarray([0.0, 1.0, 0.0]))
+    if np.linalg.norm(right) < 1e-6:
+        right = np.asarray([1.0, 0.0, 0.0])
+    else:
+        right /= np.linalg.norm(right)
+    up = np.cross(right, forward)
+    roll = np.deg2rad(float(camera.get("roll", 0)))
+    if abs(roll) > 1e-9:
+        rolled_right = right * np.cos(roll) + up * np.sin(roll)
+        up = -right * np.sin(roll) + up * np.cos(roll)
+        right = rolled_right
+    relative = np.asarray(point, dtype=np.float64) - position
+    depth = float(np.dot(relative, forward))
+    if depth <= 0.05:
+        return None
+    focal = 0.5 * width / np.tan(np.deg2rad(camera["fov"]) * 0.5)
+    return (
+        width * 0.5 + focal * float(np.dot(relative, right)) / depth,
+        height * 0.5 - focal * float(np.dot(relative, up)) / depth,
+        depth,
+    )
+
+
+def _previs_object_position(item, time_value):
+    track = item.get("motion_track")
+    if track:
+        position = _previs_track_at(track, time_value)
+    else:
+        path = item.get("path") or [
+            {"time": 0.0, "position": item["position"]},
+            {"time": 1.0, "position": item["end"]},
+        ]
+        position = _previs_track_raw_at(
+            {"interpolation": "linear", "points": path}, time_value)
+    if item["motion"] == "walk":
+        position[1] += abs(np.sin(time_value * np.pi * 6)) * 0.04 * item["scale"][1]
+    return position
+
+
+def _previs_draw_grid(draw, camera, width, height):
+    for value in range(-10, 11):
+        for start, end in (((value, 0, -10), (value, 0, 10)),
+                           ((-10, 0, value), (10, 0, value))):
+            p1 = _previs_project(start, camera, width, height)
+            p2 = _previs_project(end, camera, width, height)
+            if p1 and p2:
+                draw.line((p1[0], p1[1], p2[0], p2[1]), fill=(205, 205, 205), width=1)
+
+
+def _previs_draw_box(draw, item, position, camera, width, height):
+    sx, sy, sz = [v * 0.5 for v in item["scale"]]
+    vertices = [
+        [position[0] + x, position[1] + y, position[2] + z]
+        for x, y, z in ((-sx, -sy, -sz), (sx, -sy, -sz), (sx, sy, -sz), (-sx, sy, -sz),
+                        (-sx, -sy, sz), (sx, -sy, sz), (sx, sy, sz), (-sx, sy, sz))
+    ]
+    projected = [_previs_project(vertex, camera, width, height) for vertex in vertices]
+    faces = ((0, 1, 2, 3), (4, 5, 6, 7), (0, 4, 7, 3),
+             (1, 5, 6, 2), (3, 2, 6, 7), (0, 1, 5, 4))
+    visible = []
+    for face_index, face in enumerate(faces):
+        points = [projected[i] for i in face]
+        if all(points):
+            visible.append((sum(p[2] for p in points) / 4, face_index, points))
+    shades = ((220, 220, 220), (244, 244, 244), (226, 226, 226),
+              (235, 235, 235), (250, 250, 250), (210, 210, 210))
+    for _, face_index, points in sorted(visible, reverse=True):
+        polygon = [(p[0], p[1]) for p in points]
+        draw.polygon(polygon, fill=shades[face_index], outline=(92, 92, 92))
+
+
+def _previs_draw_actor(draw, item, position, camera, width, height, time_value):
+    scale = item["scale"][1]
+    phase = np.sin(time_value * np.pi * 6) if item["motion"] == "walk" else 0
+    joints = {
+        "hip": [position[0], position[1] + 0.9 * scale, position[2]],
+        "neck": [position[0], position[1] + 1.75 * scale, position[2]],
+        "head": [position[0], position[1] + 2.05 * scale, position[2]],
+        "lh": [position[0] - 0.55 * scale, position[1] + (1.15 - phase * 0.18) * scale, position[2]],
+        "rh": [position[0] + 0.55 * scale, position[1] + (1.15 + phase * 0.18) * scale, position[2]],
+        "lf": [position[0] - 0.28 * scale, position[1], position[2] + phase * 0.3 * scale],
+        "rf": [position[0] + 0.28 * scale, position[1], position[2] - phase * 0.3 * scale],
+    }
+    projected = {key: _previs_project(value, camera, width, height) for key, value in joints.items()}
+    for first, second in (("hip", "neck"), ("neck", "lh"), ("neck", "rh"),
+                          ("hip", "lf"), ("hip", "rf")):
+        p1, p2 = projected[first], projected[second]
+        if p1 and p2:
+            draw.line((p1[0], p1[1], p2[0], p2[1]), fill=(70, 70, 70), width=max(2, width // 280))
+    head = projected["head"]
+    head_edge = _previs_project([position[0] + 0.18 * scale, position[1] + 2.05 * scale,
+                                 position[2]], camera, width, height)
+    if head and head_edge:
+        radius = max(3, abs(head_edge[0] - head[0]))
+        draw.ellipse((head[0] - radius, head[1] - radius, head[0] + radius, head[1] + radius),
+                     fill=(248, 248, 248), outline=(70, 70, 70), width=max(1, width // 500))
+
+
+def _previs_draw_sphere(draw, item, position, camera, width, height):
+    center = _previs_project(position, camera, width, height)
+    edge = _previs_project([position[0] + item["scale"][0] * 0.5, position[1], position[2]],
+                           camera, width, height)
+    if center and edge:
+        radius = max(2, abs(edge[0] - center[0]))
+        draw.ellipse((center[0] - radius, center[1] - radius,
+                      center[0] + radius, center[1] + radius),
+                     fill=(238, 238, 238), outline=(80, 80, 80), width=max(1, width // 500))
+
+
+def _render_previs_images(scene, camera, width, height, frame_count,
+                           background_asset="", show_overlay=True):
+    """渲染中性白模帧序列；输出 PIL Image 列表，便于 ComfyUI 转 IMAGE batch。"""
+    try:
+        from PIL import ImageDraw
+    except ImportError as e:
+        raise RuntimeError("3D 白模预演需要 ComfyUI 环境中的 Pillow ImageDraw") from e
+    images = []
+    for frame_index in range(frame_count):
+        time_value = frame_index / max(1, frame_count - 1)
+        current_rig = (
+            _previs_camera_for_time(camera, time_value)
+            if "cameras" in camera else {"name": "主摄影机", "keyframes": camera["keyframes"]})
+        current_camera = _previs_camera_at(current_rig, time_value)
+        image = Image.new("RGB", (width, height), (247, 244, 239))
+        draw = ImageDraw.Draw(image)
+        _previs_draw_grid(draw, current_camera, width, height)
+        positioned = [(item, _previs_object_position(item, time_value)) for item in scene["objects"]]
+        positioned.sort(
+            key=lambda pair: np.linalg.norm(np.asarray(pair[1]) - np.asarray(current_camera["position"])),
+            reverse=True)
+        for item, position in positioned:
+            if item["type"] == "actor":
+                _previs_draw_actor(draw, item, position, current_camera, width, height, time_value)
+            elif item["type"] == "sphere":
+                _previs_draw_sphere(draw, item, position, current_camera, width, height)
+            else:
+                _previs_draw_box(draw, item, position, current_camera, width, height)
+        if show_overlay:
+            draw.rectangle((12, 12, 250, 42), fill=(255, 255, 255), outline=(145, 145, 145))
+            draw.text((22, 21), f"PREVIS  {frame_index + 1:03d}/{frame_count:03d}",
+                      fill=(36, 36, 36))
+            draw.text((142, 21), str(current_rig.get("name") or "Camera")[:16],
+                      fill=(92, 92, 92))
+            if background_asset:
+                label = os.path.basename(background_asset)[:48]
+                draw.text((18, height - 24), f"3D asset: {label}", fill=(92, 92, 92))
+        images.append(image)
+    return images
+
+
+def _previs_reference_prompt(scene, camera):
+    cameras = camera["cameras"] if "cameras" in camera else [
+        {"id": "camera-1", "name": "主摄影机", "keyframes": camera["keyframes"]}]
+    summaries = []
+    for rig in cameras:
+        first, last = rig["keyframes"][0], rig["keyframes"][-1]
+        position_track = rig.get("position_track") or {}
+        interpolation = position_track.get("interpolation", "linear")
+        speed = (
+            position_track.get("speed_description")
+            or position_track.get("speed_mode", "keyframed"))
+        track_text = f"，{interpolation} 轨迹，速度：{speed}"
+        moving = np.linalg.norm(
+            np.asarray(first["position"]) - np.asarray(last["position"])) > 0.1
+        if moving:
+            summaries.append(
+                f"{rig['name']}从 {np.round(first['position'], 2).tolist()} 平滑移动到 "
+                f"{np.round(last['position'], 2).tolist()}，看向点由 "
+                f"{np.round(first['target'], 2).tolist()} 移到 "
+                f"{np.round(last['target'], 2).tolist()}，FOV "
+                f"{first['fov']:.0f}°→{last['fov']:.0f}°{track_text}")
+        else:
+            summaries.append(f"{rig['name']}固定机位，FOV {first['fov']:.0f}°")
+    camera_text = "；".join(summaries)
+    cuts = camera.get("cuts", []) if "cameras" in camera else []
+    if len(cuts) > 1:
+        names = {rig["id"]: rig["name"] for rig in cameras}
+        cut_text = "、".join(
+            f"{cut['time'] * 100:.0f}%切至{names.get(cut['camera_id'], cut['camera_id'])}"
+            for cut in cuts)
+        camera_text += f"；切镜计划：{cut_text}"
+    moving_objects = []
+    for item in scene["objects"]:
+        if item["motion"] == "static" and item["position"] == item["end"]:
+            continue
+        track = item.get("motion_track") or {}
+        speed = track.get("speed_description") or track.get("speed_mode", "keyframed")
+        moving_objects.append(
+            f"{item['name']}（{track.get('interpolation', 'linear')}，速度：{speed}）")
+    motion_text = f"；人物/物体运动参考：{', '.join(moving_objects)}" if moving_objects else ""
+    return camera_text + motion_text + "。保持参考视频中的运动节奏和镜头路径。"
+
+
 def _register_http_routes():
-    """注册配置状态查询 / 保存接口，供前端首次使用弹窗调用（非 ComfyUI 环境自动跳过）。"""
+    """注册配置接口和受限的本地 3D 资产读取接口。"""
     try:
         from aiohttp import web
         from server import PromptServer
@@ -306,8 +1155,32 @@ def _register_http_routes():
             return web.json_response({"ok": False, "error": str(e)}, status=400)
         return web.json_response({"ok": True, "path": path})
 
+    async def local_3d_asset(request):
+        raw_path = (request.query.get("path") or "").strip()
+        if not raw_path:
+            return web.json_response({"error": "缺少 path"}, status=400)
+        path = os.path.realpath(os.path.expanduser(raw_path))
+        allowed_roots = []
+        for getter_name in (
+                "get_input_directory", "get_output_directory", "get_temp_directory"):
+            getter = getattr(folder_paths, getter_name, None)
+            if getter is not None:
+                allowed_roots.append(os.path.realpath(getter()))
+        if not any(
+                os.path.commonpath((path, root)) == root for root in allowed_roots):
+            return web.json_response({"error": "仅允许读取 ComfyUI input/output/temp 内的资产"},
+                                     status=403)
+        if os.path.splitext(path)[1].lower() not in {
+                ".glb", ".gltf", ".obj", ".fbx", ".stl", ".ply", ".spz",
+                ".splat", ".ksplat"}:
+            return web.json_response({"error": "不支持的 3D 资产格式"}, status=400)
+        if not os.path.isfile(path):
+            return web.json_response({"error": "3D 资产不存在"}, status=404)
+        return web.FileResponse(path, headers={"Content-Disposition": "inline"})
+
     routes.get("/tencent-vod-aigc/config")(config_status)
     routes.post("/tencent-vod-aigc/config")(config_save)
+    routes.get("/tencent-vod-aigc/asset")(local_3d_asset)
 
 
 # ---------------------------------------------------------------- 执行台账
@@ -345,6 +1218,9 @@ def _ledger(mode):
                                      for p in paths]
                         _append_history(rec)
                         return {"ui": {"images": ui_images}, "result": (task_id, url, path, tensor)}
+                    if m in ("t23d", "i23d"):
+                        _append_history(rec)
+                        return (task_id, url, path, _file_3d_value(path))
                     _append_history(rec)
                     return (task_id, url, path)
             try:
@@ -1154,6 +2030,207 @@ class TencentVODAIGCMusicTask:
         return (task_id, url, path)
 
 
+def _hunyuan_3d_ledger_mode(_node, kwargs):
+    has_image = (
+        kwargs.get("image") is not None
+        or bool((kwargs.get("image_path") or "").strip())
+        or bool((kwargs.get("image_url") or "").strip())
+    )
+    return "i23d" if has_image else "t23d"
+
+
+class TencentVODHunyuan3DWorld:
+    """混元 3D 世界生成：文本/最多三图 → 可漫游 3D 场景资产。"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        required = {
+            "prompt": ("STRING", {"multiline": True, "default": "",
+                                   "tooltip": "3D 世界描述，例如场景布局、时代、空间尺度与主要物件"}),
+        }
+        optional = dict(_cred_inputs())
+        optional.update({
+            "image": ("IMAGE", {
+                "tooltip": "可选参考图 batch，使用前 1-3 帧；多视图 FileInfos 尚需真实接口验证"}),
+            "image_path": ("STRING", {
+                "multiline": True, "default": "",
+                "tooltip": "可选参考图本地路径，每行一个，最多 3 个；与 IMAGE / URL 三选一"}),
+            "image_url": ("STRING", {
+                "multiline": True, "default": "",
+                "tooltip": "可选参考图 URL，每行一个，最多 3 个；与 IMAGE / 本地路径三选一"}),
+            "storage_mode": (STORAGE_MODES, {"default": "Temporary"}),
+            "filename": ("STRING", {"default": "hunyuan_3d_world",
+                                    "tooltip": "本地场景文件名，不含扩展名"}),
+            "region": ("STRING", {"default": DEFAULT_REGION}),
+            "endpoint": ("STRING", {"default": ""}),
+            "input_region": ("STRING", {"default": "",
+                                        "tooltip": "参考图 URL 在海外时填 oversea"}),
+            "poll_interval": ("INT", {"default": 10, "min": 3, "max": 120, "step": 1}),
+            "timeout": ("INT", {"default": 1800, "min": 60, "max": 7200, "step": 60}),
+            "use_cache": (ON_OFF, {"default": "Enabled",
+                                   "tooltip": "同提示词和参考图已成功生成时复用本地场景资产"}),
+        })
+        return {"required": required, "optional": optional}
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "FILE_3D")
+    RETURN_NAMES = ("task_id", "scene_url", "scene_path", "scene_3d")
+    FUNCTION = "generate"
+    CATEGORY = "Tencent VOD AIGC/3D Previs"
+    OUTPUT_NODE = True
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("NaN")
+
+    @_ledger(_hunyuan_3d_ledger_mode)
+    def generate(self, prompt, **kwargs):
+        if not prompt.strip():
+            raise ValueError("Prompt 不能为空")
+        image = kwargs.get("image")
+        image_paths = _parse_multiline(kwargs.get("image_path"))
+        image_urls = _parse_multiline(kwargs.get("image_url"))
+        if sum((image is not None, bool(image_paths), bool(image_urls))) > 1:
+            raise ValueError("参考图同时提供了 IMAGE / 本地路径 / URL，请只保留一种")
+
+        file_infos = []
+        base64_total = 0
+        if image is not None:
+            frame_count = int(image.shape[0])
+            if frame_count > 3:
+                raise ValueError(f"3D 世界参考图最多 3 张，当前 IMAGE batch 有 {frame_count} 张")
+            for frame_index in range(frame_count):
+                data = _image_tensor_to_base64(image, frame_index)
+                base64_total += len(data)
+                file_infos.append({
+                    "Type": "Base64", "Category": "Image", "Base64": data})
+        elif image_paths:
+            if len(image_paths) > 3:
+                raise ValueError(f"3D 世界参考图最多 3 张，当前路径有 {len(image_paths)} 个")
+            for path in image_paths:
+                data = _file_to_base64(
+                    path, _MAX_IMAGE_BYTES, "3D 世界参考图", _ALLOWED_IMAGE_EXTS, image=True)
+                base64_total += len(data)
+                file_infos.append({
+                    "Type": "Base64", "Category": "Image", "Base64": data})
+        elif image_urls:
+            if len(image_urls) > 3:
+                raise ValueError(f"3D 世界参考图最多 3 张，当前 URL 有 {len(image_urls)} 个")
+            for url in image_urls:
+                _validate_media_url(url, _ALLOWED_IMAGE_EXTS, "3D 世界参考图")
+                file_infos.append({"Type": "Url", "Category": "Image", "Url": url})
+        if base64_total > _MAX_BASE64_TOTAL:
+            raise ValueError("Base64 参考图总大小超过 70MB 上限")
+
+        secret_id, secret_key, sub_app_id = _resolve_credentials(
+            kwargs.get("secret_id"), kwargs.get("secret_key"), kwargs.get("sub_app_id"))
+        region = kwargs.get("region") or ""
+        endpoint = kwargs.get("endpoint") or ""
+        payload = _build_3d_world_payload(
+            sub_app_id, prompt.strip(), kwargs.get("storage_mode", "Temporary"),
+            file_infos=file_infos or None, input_region=kwargs.get("input_region") or "")
+        _set_status(self, "提交混元 3D 世界任务…")
+        response = _call_api(secret_id, secret_key, region, endpoint,
+                             "CreateAigcVideoTask", payload)
+        task_id = response.get("TaskId")
+        if not task_id:
+            raise RuntimeError(
+                f"未返回 TaskId（原始响应: {json.dumps(response, ensure_ascii=False)[:400]}）")
+        result = _wait_for_task(
+            secret_id, secret_key, region, endpoint, sub_app_id, task_id,
+            kwargs.get("poll_interval", 10), kwargs.get("timeout", 1800),
+            on_progress=lambda text: _set_status(self, text),
+            task_label="混元 3D 世界生成中", err_label="混元 3D")
+        url = result["urls"][0]
+        _set_status(self, "下载 3D 场景资产…")
+        path = _download_video(
+            url, task_id, on_progress=lambda text: _set_status(self, text),
+            name_hint=kwargs.get("filename"))
+        _set_status(self, f"完成（{os.path.basename(path)}）")
+        return (task_id, url, path, _file_3d_value(path))
+
+
+class TencentVOD3DPrevis:
+    """本地白模预演：对象/摄影机 JSON → 可合成为参考视频的 IMAGE 帧序列。"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        required = {
+            "scene_json": ("STRING", {"multiline": True, "default": _DEFAULT_PREVIS_SCENE,
+                                      "tooltip": "点击节点上的“打开 3D 预演编辑器”可视化编辑"}),
+            "camera_json": ("STRING", {"multiline": True, "default": _DEFAULT_PREVIS_CAMERA,
+                                       "tooltip": "多摄影机、归一化时间 0-1 关键帧与切镜计划；兼容旧版单摄影机 JSON"}),
+            "frame_count": ("INT", {"default": 48, "min": 2, "max": 120, "step": 1,
+                                    "tooltip": "输出帧数；同时生成原生 VIDEO"}),
+            "width": ("INT", {"default": 768, "min": 256, "max": 1280, "step": 16}),
+            "height": ("INT", {"default": 432, "min": 144, "max": 720, "step": 16}),
+        }
+        optional = {
+            "background_asset": ("FILE_3D", {
+                "tooltip": "可连接“混元 3D 世界”的 scene_3d；当前离线渲染仅标记资产，WebGL 编辑器按格式加载"}),
+            "background_asset_path": ("STRING", {
+                "default": "",
+                "tooltip": "兼容旧工作流的场景路径；SPZ 建议同时连接原生 Preview Splat"}),
+            "show_overlay": (ON_OFF, {"default": "Enabled",
+                                      "tooltip": "在预演帧上显示帧号和 3D 资产名称"}),
+            "fps": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 120.0, "step": 1.0,
+                              "tooltip": "原生 VIDEO 帧率"}),
+            "export_video": (ON_OFF, {
+                "default": "Disabled",
+                "tooltip": "启用后将原生 VIDEO 另存为 ComfyUI/output/vod_aigc 下的 MP4"}),
+            "filename_prefix": ("STRING", {
+                "default": "previs",
+                "tooltip": "导出 MP4 文件名前缀"}),
+        }
+        return {"required": required, "optional": optional}
+
+    RETURN_TYPES = ("IMAGE", "STRING", "STRING", "STRING", "VIDEO", "STRING")
+    RETURN_NAMES = (
+        "frames", "camera_plan", "scene_plan", "reference_prompt", "video", "video_path")
+    FUNCTION = "render"
+    CATEGORY = "Tencent VOD AIGC/3D Previs"
+    OUTPUT_NODE = True
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("NaN")
+
+    def render(self, scene_json, camera_json, frame_count, width, height, fps=24.0,
+               background_asset=None, background_asset_path="", show_overlay="Enabled",
+               export_video="Disabled", filename_prefix="previs"):
+        scene = _parse_previs_scene(scene_json)
+        camera = _parse_previs_camera(camera_json)
+        asset_path = (background_asset_path or "").strip()
+        if background_asset is not None and hasattr(background_asset, "get_source"):
+            source = background_asset.get_source()
+            if isinstance(source, str):
+                asset_path = source
+        images = _render_previs_images(
+            scene, camera, int(width), int(height), int(frame_count),
+            background_asset=asset_path,
+            show_overlay=show_overlay == "Enabled")
+        try:
+            import torch
+            frames = torch.stack([
+                torch.from_numpy(np.array(image, dtype=np.float32, copy=True) / 255.0)
+                for image in images
+            ])
+        except Exception as e:
+            raise RuntimeError(f"预演帧转 IMAGE 失败：{e}") from e
+        normalized_scene = json.dumps(scene, ensure_ascii=False, indent=2)
+        normalized_camera = json.dumps(camera, ensure_ascii=False, indent=2)
+        prompt = _previs_reference_prompt(scene, camera)
+        video = _native_video_from_frames(frames, float(fps))
+        video_path = ""
+        if export_video == "Enabled":
+            video_path = _next_previs_video_path(filename_prefix)
+            try:
+                video.save_to(video_path)
+            except Exception as e:
+                raise RuntimeError(f"预演视频导出失败：{e}") from e
+        return (
+            frames, normalized_camera, normalized_scene, prompt, video, video_path)
+
+
 class TencentVODAIGCQueryTask:
     """查询任务状态：输入 TaskId，输出状态与输出文件 URL（任务超时/失败排查用）。"""
 
@@ -1273,7 +2350,12 @@ class TencentVODAIGCViewHistory:
                     cost_txt = f"≈¥{cost:.2f}" if cost > 0 else "¥未配置单价"
                 else:
                     cost_txt = f"≈¥{cost:.2f}/{billed}s" if cost > 0 else "¥未配置单价"
-                spec = "音乐" if r.get("mode") == "t2a" else f"{r.get('resolution', '')}/{r.get('duration', '')}s"
+                if r.get("mode") == "t2a":
+                    spec = "音乐"
+                elif r.get("mode") in ("t23d", "i23d"):
+                    spec = "3D 场景"
+                else:
+                    spec = f"{r.get('resolution', '')}/{r.get('duration', '')}s"
                 url_or_asset = r.get("video_url") or asset
                 view = r.get("view_url") or ""
                 lines.append(
@@ -1291,6 +2373,13 @@ class TencentVODAIGCViewHistory:
 TencentVODH3TextToVideo.generate = _ledger("t2v")(TencentVODH3TextToVideo.generate)
 TencentVODH3ImageToVideo.generate = _ledger("i2v")(TencentVODH3ImageToVideo.generate)
 TencentVODH3ReferenceToVideo.generate = _ledger("r2v")(TencentVODH3ReferenceToVideo.generate)
+TencentVODHunyuan3DWorld.generate = _ledger(
+    lambda _node, values: "i23d" if (
+        values.get("image") is not None
+        or (values.get("image_path") or "").strip()
+        or (values.get("image_url") or "").strip()
+    ) else "t23d"
+)(TencentVODHunyuan3DWorld.generate)
 
 NODE_CLASS_MAPPINGS = {
     "TencentVODH3TextToVideo": TencentVODH3TextToVideo,
@@ -1303,6 +2392,8 @@ NODE_CLASS_MAPPINGS = {
     "TencentVODAIGCQueryTask": TencentVODAIGCQueryTask,
     "TencentVODAIGCDownloadVideo": TencentVODAIGCDownloadVideo,
     "TencentVODAIGCViewHistory": TencentVODAIGCViewHistory,
+    "TencentVODHunyuan3DWorld": TencentVODHunyuan3DWorld,
+    "TencentVOD3DPrevis": TencentVOD3DPrevis,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1316,6 +2407,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "TencentVODAIGCQueryTask": "VOD AIGC - 查询任务",
     "TencentVODAIGCDownloadVideo": "VOD AIGC - 下载视频",
     "TencentVODAIGCViewHistory": "VOD AIGC - 查看执行台账",
+    "TencentVODHunyuan3DWorld": "VOD AIGC - 混元 3D 世界生成",
+    "TencentVOD3DPrevis": "VOD AIGC - 3D 白模预演台",
 }
 
 

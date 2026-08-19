@@ -69,11 +69,11 @@ _CACHE_KEY_PARAMS = ("duration", "resolution", "aspect_ratio", "audio_generation
                      "storage_mode", "enhance_prompt", "media_name", "model",
                      "output_image_count", "output_format", "lyrics", "is_instrumental",
                      "model_version", "seed", "logo_add", "ext_info",
-                     "high_bitrate", "return_last_frame")
+                     "high_bitrate", "return_last_frame", "scene_type")
 _CACHE_KEY_REFS = ("ref_image_urls", "ref_image_paths", "ref_video_paths", "ref_video_urls",
                    "ref_audio_paths", "ref_audio_urls",
                    "first_frame_url", "first_frame_path", "last_frame_url", "last_frame_path",
-                   "filename")
+                   "image_url", "image_path", "filename")
 
 
 class TaskError(RuntimeError):
@@ -336,7 +336,6 @@ def parse_multiline(text):
     return [line.strip() for line in text.splitlines() if line.strip()]
 
 
-_REF_RE = re.compile(r"@(?:图片)?(\d+)")
 def annotate_content_refs(message, names):
     """把腾讯报错里的 content[N] 索引映射为素材名（0 基同序）；无法映射保留原样。"""
     if not names:
@@ -347,9 +346,6 @@ def annotate_content_refs(message, names):
             return f"content[{idx}]({names[idx]})"
         return m.group(0)
     return re.sub(r"content\[(\d+)\]", _repl, message or "")
-
-
-
 
 
 # 引用 token 边界：@ 前不能是词字符（邮箱/URL 里的 @ 不算引用）；@N 后不能紧跟词字符
@@ -390,7 +386,6 @@ def _reject_name_refs(s: str) -> None:
 
 def normalize_prompt_refs(prompt: str, ref_image_count: int) -> str:
     """完整素材引用解析（节点与 SDK 的统一入口）：
-
     1. 暂存 `\@` 字面量（普通文本中的 @，如邮箱）
     2. 词边界内转换 `@N` / `@图片N` → 「图N」（1 基，越界报错）
     3. 拒绝残留的 `@名称` 与格式错误引用（Unicode 名称，PixVerse 专属能力）
@@ -705,6 +700,30 @@ def build_video_payload(sub_app_id, prompt, enhance_prompt, oc_values, file_info
     return payload
 
 
+def build_3d_world_payload(sub_app_id, prompt, storage_mode="Temporary", file_infos=None,
+                           input_region=""):
+    """构造混元 3D 世界生成请求体。
+
+    对应《VOD AIGC 服务接入指南》3.15：
+    ModelName=Hunyuan、ModelVersion=3d_2.0、SceneType=3d_scene。
+    文档未公开相机、输出格式等参数，因此这里只发送已文档化字段；StorageMode
+    作为通用输出存储配置传入，方便生成结果落 VOD。
+    """
+    payload = {
+        "SubAppId": int(sub_app_id),
+        "ModelName": "Hunyuan",
+        "ModelVersion": "3d_2.0",
+        "SceneType": "3d_scene",
+        "Prompt": prompt,
+        "OutputConfig": {"StorageMode": storage_mode},
+    }
+    if file_infos:
+        payload["FileInfos"] = file_infos
+    if input_region:
+        payload["InputRegion"] = input_region
+    return payload
+
+
 def build_image_payload(sub_app_id, prompt, model, oc_values, file_infos=None):
     """构造 CreateAigcImageTask 请求体（3.3.2 GEM/Jimeng、3.14 GPT-Image2）。"""
     name, _, version = (model or "Jimeng 4.0").partition(" ")
@@ -990,12 +1009,13 @@ def cache_key(mode: str, prompt: str, kwargs: dict) -> str:
         v = kwargs.get(k)
         if v:
             refs.append(f"{k}={v}")
-    img = kwargs.get("ref_images")
-    if img is not None:
-        try:
-            refs.append(f"ref_images={hashlib.sha256(img.cpu().numpy().tobytes()).hexdigest()[:16]}")
-        except Exception:
-            refs.append(f"ref_images=<unhashable>")
+    for image_key in ("ref_images", "image"):
+        img = kwargs.get(image_key)
+        if img is not None:
+            try:
+                refs.append(f"{image_key}={hashlib.sha256(img.cpu().numpy().tobytes()).hexdigest()[:16]}")
+            except Exception:
+                refs.append(f"{image_key}=<unhashable>")
     key["refs"] = "|".join(refs)
     return hashlib.sha256(json.dumps(key, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
@@ -1010,12 +1030,15 @@ def base_record(mode: str, prompt: str, kwargs: dict, task_id="", url="", path="
     view_url 为调用方计算的 ComfyUI /view 链接（无头环境传空）。
     """
     if mode in ("t2i", "i2i"):
-        model = kwargs.get("model") or ""
+        model = kwargs.get("model") or ("Hunyuan 3d_2.0" if mode in ("t23d", "i23d") else "")
         image_count = int(kwargs.get("output_image_count") or 1)
         seconds_billed, estimated_cost = 0, round(image_count * image_price_for(model, cfg), 4)
     elif mode == "t2a":
         model, image_count = kwargs.get("model") or "", 0
         seconds_billed, estimated_cost = 0, 0.0  # 音乐生成不计秒不计费
+    elif mode in ("t23d", "i23d"):
+        model, image_count = kwargs.get("model") or "Hunyuan 3d_2.0", 0
+        seconds_billed, estimated_cost = 0, 0.0  # 3D 世界按次计费，当前配置未维护单次价格
     else:
         # 视频按秒计费：H3 等旧模型走 prices[res]；VS 走 model_price_tables
         # （kwargs.model 形如 "VS 2.5"，has_video_ref 由 VS 节点注入）
@@ -1195,8 +1218,8 @@ def run_video_task(cfg, *, mode, prompt, duration, resolution, aspect_ratio,
         "ref_image_paths": ref_image_paths or [], "ref_video_paths": ref_video_paths or [],
         "ref_audio_paths": ref_audio_paths or [], "use_cache": use_cache,
     }
-    # 素材引用归一化：@N → 图N（r2v 按参考图顺序），@名称 拒绝；缓存键用原始 prompt（确定性）
-    ref_image_count = len(ref_image_paths or [])
+    # 素材引用归一化：@N → 图N（r2v 按参考图顺序），@名称拒绝；归一化结果参与缓存键。
+    ref_image_count = len(parse_multiline(ref_image_paths))
     prompt = normalize_prompt_refs(prompt, ref_image_count)
     ck = cache_key(mode, prompt, kwargs)
 

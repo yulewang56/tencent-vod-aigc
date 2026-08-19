@@ -3,7 +3,11 @@
 import { app } from "../../scripts/app.js";
 
 const REQUIRES_CREDS = /^TencentVOD/;
-const NO_CREDS_NEEDED = new Set(["TencentVODAIGCViewHistory", "TencentVODAIGCDownloadVideo"]);
+const NO_CREDS_NEEDED = new Set([
+  "TencentVODAIGCViewHistory",
+  "TencentVODAIGCDownloadVideo",
+  "TencentVOD3DPrevis",
+]);
 
 app.registerExtension({
   name: "TencentVODAIGC.CredentialsSetup",

@@ -1,7 +1,8 @@
 # tencent-vod-aigc
 
-ComfyUI 自定义节点：通过**腾讯云 VOD AIGC** 聚合服务调用 **MiniMax Hailuo H3** 生视频模型，
-另含 **MPS AI 音乐生成**（GL / MiniMaxMusic）。
+ComfyUI 自定义节点：通过**腾讯云 VOD AIGC** 聚合服务调用 **MiniMax Hailuo H3**、**VS**
+生视频模型与**混元 3D 世界生成**，另含本地 **3D 白模预演台**、生图、素材注册和
+**MPS AI 音乐生成**（GL / MiniMaxMusic）。
 
 协议为腾讯云 API v3（TC3-HMAC-SHA256 签名，`CreateAigcVideoTask` / `DescribeTaskDetail`，
 音乐为 MPS `CreateAigcAudioTask` / `DescribeAigcAudioTask`），对应《VOD AIGC服务接入指南》3.17 节。
@@ -18,11 +19,13 @@ ComfyUI 自定义节点：通过**腾讯云 VOD AIGC** 聚合服务调用 **Mini
 | `VOD AIGC - 创建素材` | CreateAigcMaterial 素材注册：URL → 异步任务 → 输出 `asset://asset-xxx`（VS 人脸素材前置），真人素材需 GroupId（活体认证） |
 | `VOD AIGC - 文生图/图生图` | 生图：GEM / Jimeng（3.3.2）+ GPT-Image2（3.14，OG image2_low/medium/high），支持多图输出（1-8 张）、输出格式，可接 ComfyUI 图像、本地图片路径或参考图 URL；`preview_image` 输出 IMAGE 张量（原生预览 + 可接下游） |
 | `VOD AIGC - 音乐生成 (MPS)` | AI 音乐生成：GL / MiniMaxMusic，支持歌词与纯音乐、参考音频（路径/URL）、mp3/wav 输出 |
+| `VOD AIGC - 混元 3D 世界生成` | VOD `Hunyuan / 3d_2.0 / 3d_scene`：文本或 1-3 张参考图生成可漫游 3D 世界，输出本地路径和原生 `FILE_3D`（当前文档示例通常为 `.spz`） |
+| `VOD AIGC - 3D 白模预演台` | 无需云端凭据；WebGL 主视窗编辑立体人物/体块、曲线与速度、多摄影机/切镜，输出 `IMAGE`、原生 `VIDEO` 与可选 MP4 |
 | `VOD AIGC - 查询任务` | 按 TaskId 查状态（超时/失败排查用） |
 | `VOD AIGC - 下载视频` | 按 URL 重新下载视频 |
 | `VOD AIGC - 查看执行台账` | 显示 `output/vod_aigc/execution_history.jsonl` 中的历史记录（右下角浮窗） |
 
-所有生成节点运行（成功或失败）都会自动写入执行台账
+所有云端生成节点运行（成功或失败）都会自动写入执行台账
 `output/vod_aigc/execution_history.jsonl`（时间、TaskId、提示词、计费要素、产物路径），
 可用 `jq` / Excel 查询：
 
@@ -46,9 +49,11 @@ git clone https://github.com/yulewang56/tencent-vod-aigc.git
 
 **方式一（推荐）：首次使用弹窗**
 
-在画布上添加任一生成/查询节点，若凭据未配置会自动弹出设置框——填写
+在画布上添加任一云端生成/查询节点，若凭据未配置会自动弹出设置框——填写
 SecretId / SecretKey / SubAppId（单价为选填，用于台账费用预估）→ 保存。
 密钥只写入本地配置文件，不进入工作流 JSON。
+
+`VOD AIGC - 3D 白模预演台` 完全在本地运行，不需要腾讯云凭据。
 
 **方式二：手动创建配置文件**
 
@@ -146,6 +151,39 @@ cp tencent-vod-config.example.json tencent-vod-config.json
 - 接口：MPS `CreateAigcAudioTask` / `DescribeAigcAudioTask`（API 版本 2019-06-12，域名 `mps.tencentcloudapi.com`）；
   MPS 无 SubAppId，凭据仅需 SecretId / SecretKey；台账 mode 记 `t2a`（不计秒不计费）
 
+### 3D 世界与白模预演
+
+**混元 3D 世界生成**：
+
+- 固定调用 `ModelName=Hunyuan`、`ModelVersion=3d_2.0`、`SceneType=3d_scene`
+- 支持纯文本或 1-3 张参考图（ComfyUI IMAGE batch / 多行本地路径 / 多行 URL 三选一）
+- 多图以多个 `FileInfos` 提交，属于实验能力；VOD 文档只明确确认图生 3D，账号未验证前不要假设
+  三张图都会参与多视图重建。执行节点会创建真实付费任务
+- 输出 `task_id / scene_url / scene_path / scene_3d`；`scene_3d` 为 ComfyUI 原生 `FILE_3D`，
+  可直接连接 Load 3D / Preview 3D / Preview Splat；扩展名沿用服务实际返回值
+- 3D 场景按次计费，节点台账记 `t23d/i23d`，不套用视频按秒单价；实际单次价格以商务配置为准
+
+**3D 白模预演台**：
+
+- 点击节点上的「打开 3D 预演编辑器」进入 Three.js WebGL 主视窗；人物使用球体/胶囊/
+  圆柱组合的立体 humanoid 简模，体块和球体也是实际 3D mesh
+- 主视窗支持透视/顶/前/侧视图、Orbit 浏览、TransformControls 和轨迹控制点拖拽；
+  右上角镜头观察窗可独立选择摄影机或跟随当前切镜
+- 对象和摄影机 Position / Look At 轨迹支持 `linear`、`catmull_rom`、`bezier`，速度支持
+  `keyframed`、`constant`、`ease_in`、`ease_out`、`ease_in_out`、`custom`；
+  曲线匀速和 easing 使用弧长采样，`speed_description` 会写入下游参考提示词
+- 支持最多 8 台摄影机方案：新增、复制、重命名、切换和删除；每台摄影机拥有独立的
+  Position / Look At / FOV / Roll 关键帧，并可在底部时间线上添加切镜点
+- 旧版单摄影机 `{keyframes:[...]}`、v2 多摄影机和对象 `position/end/path` 会自动迁移为 V3，
+  保存时仍同步兼容字段
+- 节点输出 `IMAGE` batch 和原生 `VIDEO`；`fps` 控制帧率，启用 `export_video` 后同时写出 MP4，
+  可直接连接 ComfyUI `Save Video` 或支持视频输入的下游节点，不再依赖 VideoHelperSuite
+- `scene_path` 可连接到 `background_asset_path`，`scene_3d` 可连接到 `background_asset`。
+  编辑器可加载 ComfyUI input/output/temp 下的 GLB/GLTF/OBJ/PLY；SPZ/3DGS 当前需使用
+  ComfyUI 原生 Preview Splat 查看，尚未合成到本节点的离线预演帧
+- `reference_prompt` 输出会概括镜头和人物运动，可与预演 MP4 一起提供给支持参考视频的生成节点；
+  生成模型把它作为运动/运镜参考，不保证逐帧复现摄影机轨迹
+
 ## 素材限制（来自文档，超限节点会直接报错）
 
 **H3 节点**：
@@ -181,6 +219,19 @@ Load Image（SD/Flux 生图）
 VOD AIGC - H3 图生视频（first_frame ← Load Image 输出）
     ↓ video_path
 VideoHelperSuite / 其他视频节点 → 后处理
+```
+
+**混元场景 → 白模运镜 → 参考视频**：
+
+```
+VOD AIGC - 混元 3D 世界生成
+    ├─ scene_path → VOD AIGC - 3D 白模预演台 / background_asset_path
+    └─ scene_3d   → Preview 3D / Preview Splat
+VOD AIGC - 3D 白模预演台（WebGL 编辑人物、曲线速度、多摄影机与切镜）
+    ├─ video      → Save Video 或下游视频输入
+    └─ video_path → 启用 export_video 时直接得到预演 MP4
+    ↓
+支持参考视频的 VS / Kling 工作流 → 最终视频
 ```
 
 ## 素材引用语法（@N）

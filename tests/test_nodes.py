@@ -13,6 +13,45 @@ folder_paths.get_input_directory = lambda: "/tmp/comfy_input"
 comfy.folder_paths = folder_paths
 sys.modules["comfy"] = comfy
 sys.modules["comfy.folder_paths"] = folder_paths
+
+class FakeFile3D:
+    def __init__(self, source):
+        self.source = source
+
+    def get_source(self):
+        return self.source
+
+
+class FakeVideoComponents:
+    def __init__(self, images, audio, frame_rate):
+        self.images = images
+        self.audio = audio
+        self.frame_rate = frame_rate
+
+
+class FakeVideo:
+    def __init__(self, components):
+        self.components = components
+
+    def save_to(self, path):
+        with open(path, "wb") as handle:
+            handle.write(b"fake-video")
+
+
+class FakeInputImpl:
+    @staticmethod
+    def VideoFromComponents(components):
+        return FakeVideo(components)
+
+
+comfy_api = types.ModuleType("comfy_api")
+comfy_api_latest = types.ModuleType("comfy_api.latest")
+comfy_api_latest.InputImpl = FakeInputImpl
+comfy_api_latest.Types = types.SimpleNamespace(
+    File3D=FakeFile3D, VideoComponents=FakeVideoComponents)
+sys.modules["comfy_api"] = comfy_api
+sys.modules["comfy_api.latest"] = comfy_api_latest
+
 try:
     import numpy  # noqa: F401  真实 numpy（若有）
 except ImportError:
@@ -42,7 +81,8 @@ expected = ["TencentVODH3TextToVideo", "TencentVODH3ImageToVideo",
             "TencentVODH3ReferenceToVideo", "TencentVODVSVideoTask",
             "TencentVODAIGCCreateMaterial", "TencentVODAIGCImageTask",
             "TencentVODAIGCMusicTask", "TencentVODAIGCQueryTask",
-            "TencentVODAIGCDownloadVideo", "TencentVODAIGCViewHistory"]
+            "TencentVODAIGCDownloadVideo", "TencentVODAIGCViewHistory",
+            "TencentVODHunyuan3DWorld", "TencentVOD3DPrevis"]
 check("all nodes registered", set(expected) == set(nodes.NODE_CLASS_MAPPINGS),
       f"got {sorted(nodes.NODE_CLASS_MAPPINGS)}")
 check("display names cover all", set(expected) == set(nodes.NODE_DISPLAY_NAME_MAPPINGS))
@@ -54,6 +94,16 @@ for name, cls in nodes.NODE_CLASS_MAPPINGS.items():
     check(f"{name}: INPUT_TYPES/RETURN_TYPES/FUNCTION",
           t.get("required") is not None and len(ret) == len(cls.RETURN_NAMES) and hasattr(cls, fname))
     check(f"{name}: IS_CHANGED=NaN (no caching)", cls.IS_CHANGED() != cls.IS_CHANGED())
+
+previs_inputs = nodes.TencentVOD3DPrevis.INPUT_TYPES()
+check("previs: legacy widget order preserved",
+      list(previs_inputs["required"]) == [
+          "scene_json", "camera_json", "frame_count", "width", "height"]
+      and list(previs_inputs["optional"])[:3] == [
+          "background_asset", "background_asset_path", "show_overlay"])
+check("previs: legacy outputs remain prefix",
+      nodes.TencentVOD3DPrevis.RETURN_NAMES[:4]
+      == ("frames", "camera_plan", "scene_plan", "reference_prompt"))
 
 # ---- 2. TC3 signing ----
 headers, body = nodes._sign_request("AKIDtest123", "secretKey456", "ap-guangzhou",
@@ -795,6 +845,197 @@ ck_m3 = nodes._cache_key("t2a", "p", {"model": "MiniMaxMusic 2.6", "lyrics": "�
 ck_m4 = nodes._cache_key("t2a", "p", {"model": "MiniMaxMusic 2.6", "lyrics": "词A", "is_instrumental": "Disabled",
                                       "ref_audio_paths": "input/a.mp3"})
 check("music: lyrics/instrumental/ref_audio in key", len({ck_m1, ck_m2, ck_m3, ck_m4}) == 4)
+
+
+# ---- 25. 混元 3D 世界 + WebGL 白模预演（v1.18.0）----
+p3d = nodes._build_3d_world_payload(
+    "1500044236", "古代宫殿庭院", "Permanent",
+    file_infos=[{"Type": "Url", "Category": "Image", "Url": "https://x/ref.png"}],
+    input_region="oversea")
+check("3d: payload exact model/scene",
+      p3d["SubAppId"] == 1500044236
+      and p3d["ModelName"] == "Hunyuan"
+      and p3d["ModelVersion"] == "3d_2.0"
+      and p3d["SceneType"] == "3d_scene"
+      and p3d["OutputConfig"] == {"StorageMode": "Permanent"}
+      and p3d["FileInfos"][0]["Category"] == "Image"
+      and p3d["InputRegion"] == "oversea", str(p3d))
+
+captured_3d = {}
+ledger_3d = []
+orig_call_3d = nodes._call_api
+orig_dl_3d = nodes._download_video
+orig_append_3d = nodes._append_history
+def fake_3d_call(sid, sk, reg, ep, action, payload, version="", service=""):
+    if action == "CreateAigcVideoTask":
+        captured_3d["payload"] = payload
+        return {"TaskId": "t-hunyuan-3d"}
+    return {"TaskType": "AigcVideoTask", "Status": "FINISH",
+            "AigcVideoTask": {"Status": "FINISH", "Output": {"FileInfos": [
+                {"FileUrl": "https://cdn/world.spz"}]}}}
+nodes._call_api = fake_3d_call
+nodes._download_video = lambda url, task_id, on_progress=None, name_hint=None: "/tmp/comfy_output/vod_aigc/world.spz"
+nodes._append_history = lambda record: ledger_3d.append(record)
+try:
+    result_3d = nodes.TencentVODHunyuan3DWorld().generate(
+        "古代宫殿庭院", secret_id="AKIDx", secret_key="sk", sub_app_id="1500044236",
+        image_url="https://x/ref.png", storage_mode="Permanent",
+        poll_interval=3, timeout=60, use_cache="Disabled")
+    check("3d: flow returns spz",
+          result_3d[:3] == ("t-hunyuan-3d", "https://cdn/world.spz",
+                            "/tmp/comfy_output/vod_aigc/world.spz")
+          and isinstance(result_3d[3], FakeFile3D), str(result_3d))
+    check("3d: request includes single image",
+          captured_3d["payload"]["FileInfos"] == [
+              {"Type": "Url", "Category": "Image", "Url": "https://x/ref.png"}],
+          str(captured_3d["payload"]))
+    check("3d: ledger i23d no per-second charge",
+          ledger_3d[-1]["mode"] == "i23d"
+          and ledger_3d[-1]["seconds_billed"] == 0
+          and ledger_3d[-1]["estimated_cost"] == 0.0, str(ledger_3d[-1]))
+    nodes.TencentVODHunyuan3DWorld().generate(
+        "同一空间三视图", secret_id="AKIDx", secret_key="sk", sub_app_id="1500044236",
+        image_url="https://x/front.png\nhttps://x/left.png\nhttps://x/right.png",
+        storage_mode="Temporary", poll_interval=3, timeout=60, use_cache="Disabled")
+    check("3d: up to three reference views",
+          [item["Url"] for item in captured_3d["payload"]["FileInfos"]]
+          == ["https://x/front.png", "https://x/left.png", "https://x/right.png"],
+          str(captured_3d["payload"]))
+finally:
+    nodes._call_api = orig_call_3d
+    nodes._download_video = orig_dl_3d
+    nodes._append_history = orig_append_3d
+
+try:
+    nodes.TencentVODHunyuan3DWorld().generate(
+        "冲突", image_path=ref_png, image_url="https://x/ref.png")
+    check("3d: image inputs exclusive", False)
+except ValueError as e:
+    check("3d: image inputs exclusive", "只保留一种" in str(e), str(e))
+try:
+    nodes.TencentVODHunyuan3DWorld().generate(
+        "过多图片", image_url="\n".join(f"https://x/{i}.png" for i in range(4)))
+    check("3d: more than three views rejected", False)
+except ValueError as e:
+    check("3d: more than three views rejected", "最多 3 张" in str(e), str(e))
+
+scene_3d = nodes._parse_previs_scene(nodes._DEFAULT_PREVIS_SCENE)
+camera_3d = nodes._parse_previs_camera(nodes._DEFAULT_PREVIS_CAMERA)
+check("previs: default scene parsed",
+      scene_3d["version"] == 3
+      and len(scene_3d["objects"]) == 3
+      and {item["type"] for item in scene_3d["objects"]} == {"actor", "box"}
+      and all("motion_track" in item for item in scene_3d["objects"]))
+path_scene = nodes._parse_previs_scene(json.dumps({"objects": [{
+    "id": "actor-path", "name": "曲线路径人物", "type": "actor",
+    "position": [0, 0, 0], "end": [4, 0, 4], "scale": [1, 1, 1],
+    "path": [
+        {"time": 0, "position": [0, 0, 0]},
+        {"time": 0.5, "position": [2, 0, 0]},
+        {"time": 1, "position": [4, 0, 4]},
+    ],
+}]}))
+check("previs: object path interpolates piecewise",
+      nodes._previs_object_position(path_scene["objects"][0], 0.25) == [1.0, 0.0, 0.0]
+      and nodes._previs_object_position(path_scene["objects"][0], 0.75) == [3.0, 0.0, 2.0])
+bezier_scene = nodes._parse_previs_scene(json.dumps({"objects": [{
+    "type": "actor", "scale": [1, 1, 1],
+    "motion_track": {
+        "interpolation": "bezier", "speed_mode": "keyframed",
+        "points": [
+            {"time": 0, "position": [0, 0, 0], "out_handle": [0, 0, 2]},
+            {"time": 1, "position": [2, 0, 0], "in_handle": [2, 0, 2]},
+        ],
+    },
+}]}))
+check("previs: cubic bezier track",
+      nodes.np.allclose(nodes._previs_object_position(
+          bezier_scene["objects"][0], 0.5), [1.0, 0.0, 1.5]))
+constant_scene = nodes._parse_previs_scene(json.dumps({"objects": [{
+    "type": "box", "scale": [1, 1, 1],
+    "motion_track": {
+        "interpolation": "linear", "speed_mode": "constant",
+        "speed_description": "匀速",
+        "points": [
+            {"time": 0, "position": [0, 0, 0]},
+            {"time": 0.9, "position": [1, 0, 0]},
+            {"time": 1, "position": [10, 0, 0]},
+        ],
+    },
+}]}))
+check("previs: constant speed uses arc length",
+      nodes.np.allclose(nodes._previs_object_position(
+          constant_scene["objects"][0], 0.5), [5.0, 0.0, 0.0], atol=0.02))
+try:
+    nodes._parse_previs_scene(json.dumps({"objects": [{
+        "type": "box", "path": [
+            {"time": 0.5, "position": [0, 0, 0]},
+            {"time": 0.5, "position": [1, 0, 1]},
+        ],
+    }]}))
+    check("previs: duplicate path times rejected", False)
+except ValueError as e:
+    check("previs: duplicate path times rejected", "严格递增" in str(e), str(e))
+mid_camera = nodes._previs_camera_at(camera_3d, 0.5)
+check("previs: camera interpolates",
+      mid_camera["position"] == [5.25, 3.65, 7.25]
+      and mid_camera["target"] == [0.25, 1.0, 0.0]
+      and mid_camera["fov"] == 45.0, str(mid_camera))
+legacy_camera = nodes._parse_previs_camera(json.dumps({
+    "keyframes": [{"time": 0, "position": [1, 2, 3], "target": [0, 0, 0], "fov": 50}]
+}))
+check("previs: legacy camera migrates to v3",
+      legacy_camera["version"] == 3
+      and legacy_camera["active_camera"] == "camera-1"
+      and legacy_camera["cameras"][0]["keyframes"][0]["position"] == [1.0, 2.0, 3.0]
+      and "position_track" in legacy_camera["cameras"][0]
+      and legacy_camera["cuts"] == [{"time": 0.0, "camera_id": "camera-1"}],
+      str(legacy_camera))
+multi_camera = nodes._parse_previs_camera(json.dumps({
+    "version": 2,
+    "active_camera": "wide",
+    "cameras": [
+        {"id": "wide", "name": "广角", "keyframes": [
+            {"time": 0, "position": [8, 5, 9], "target": [0, 1, 0], "fov": 55}]},
+        {"id": "close", "name": "近景", "keyframes": [
+            {"time": 0.5, "position": [2, 2, 3], "target": [0, 1, 0], "fov": 32},
+            {"time": 1, "position": [1, 2, 2], "target": [0, 1, 0], "fov": 28}]},
+    ],
+    "cuts": [{"time": 0, "camera_id": "wide"}, {"time": 0.5, "camera_id": "close"}],
+}))
+check("previs: cuts select camera",
+      nodes._previs_camera_for_time(multi_camera, 0.25)["id"] == "wide"
+      and nodes._previs_camera_for_time(multi_camera, 0.75)["id"] == "close"
+      and nodes._previs_camera_at(multi_camera, 0.75)["position"] == [1.5, 2.0, 2.5])
+check("previs: multi-camera prompt includes cuts",
+      "切镜计划" in nodes._previs_reference_prompt(scene_3d, multi_camera)
+      and "近景" in nodes._previs_reference_prompt(scene_3d, multi_camera))
+try:
+    nodes._parse_previs_scene('{"objects":[{"type":"mesh"}]}')
+    check("previs: unsupported object rejected", False)
+except ValueError as e:
+    check("previs: unsupported object rejected", "type" in str(e), str(e))
+if hasattr(nodes.Image, "new") and hasattr(nodes.np, "asarray"):
+    previs_frames = nodes._render_previs_images(
+        scene_3d, camera_3d, 320, 180, 3, background_asset="world.spz")
+    check("previs: renders image sequence",
+          len(previs_frames) == 3 and all(frame.size == (320, 180) for frame in previs_frames))
+    check("previs: reference prompt generated",
+          "镜头" in nodes._previs_reference_prompt(scene_3d, camera_3d))
+    try:
+        import torch as _torch  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        rendered = nodes.TencentVOD3DPrevis().render(
+            nodes._DEFAULT_PREVIS_SCENE, nodes._DEFAULT_PREVIS_CAMERA,
+            frame_count=2, width=320, height=176)
+        check("previs: node outputs ComfyUI IMAGE batch",
+              tuple(rendered[0].shape) == (2, 176, 320, 3)
+              and json.loads(rendered[1])["version"] == 3
+              and bool(rendered[3])
+              and isinstance(rendered[4], FakeVideo)
+              and rendered[5] == "", str(tuple(rendered[0].shape)))
 
 
 # ---- 汇总 ----

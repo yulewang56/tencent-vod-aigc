@@ -1,0 +1,11 @@
+{
+  "name": "tencent-vod-aigc-web",
+  "private": true,
+  "scripts": {
+    "build:web": "esbuild web/src/previs_editor.js --bundle --format=esm --platform=browser --target=es2022 --external:../../scripts/app.js --outfile=web/previs_editor.js"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.9",
+    "three": "^0.180.0"
+  }
+}
