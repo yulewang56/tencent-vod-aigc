@@ -352,44 +352,70 @@ def annotate_content_refs(message, names):
 
 
 
-_NAME_REF_RE = re.compile(r"@(?!图片\d+)([\u4e00-\u9fa5A-Za-z_][\u4e00-\u9fa5A-Za-z0-9_]*)")  # 排除兼容语法 @图片N
+# 引用 token 边界：@ 前不能是词字符（邮箱/URL 里的 @ 不算引用）；@N 后不能紧跟词字符
+# （@1皇后 这类粘连不算合法序号引用）。\w 在 Python3 默认 Unicode 模式，覆盖 É/キャラ/퀸 等。
+_WORD = r"[\w\u4e00-\u9fa5]"
+_REF_TOKEN_RE = re.compile(rf"(?<!{_WORD})@(图片)?(\d+)(?!{_WORD})")
+_NAME_TOKEN_RE = re.compile(rf"(?<!{_WORD})@(?!图片\d+(?!{_WORD}))([^\d\s@][\w\u4e00-\u9fa5]*)")  # @名称（非数字开头；完整 @图片N 兼容语法放行）
+_GLUE_REF_RE = re.compile(rf"(?<!{_WORD})@(\d+[^\s\d@=][\w\u4e00-\u9fa5]*)")  # @1皇后 粘连（= 是合法分隔符）
+_ESCAPED_AT = "\x00VODAT\x00"  # \@ 字面量占位符（用户写 \@ 表示普通 @ 文本）
 
 
-def validate_prompt_refs(prompt: str) -> None:
-    """校验 prompt 中没有不被本节点支持的素材引用语法。
-
-    腾讯 VOD 接入层的 `FileInfos.Text` + `@名称` 绑定**仅 PixVerse 模型**生效
-    （接入指南原文），H3 / VS 模型不支持——`@皇后` 这类名称引用会被模型当作
-    普通文本忽略，造成静默错绑。本节点只支持 `@N`（1 基序号，提交时转换为
-    API 的顺序引用「图N」）。检测到残留的 `@名称` 直接报错，避免误导。
-    """
-    if not prompt:
-        return
-    for m in _NAME_REF_RE.finditer(prompt):
-        name = m.group(1)
-        raise ValueError(
-            f"prompt 中的 @{name} 不是有效的素材引用：本节点（H3/VS）仅支持 @N 序号引用"
-            f"（@1=第 1 张参考图，BatchImagesNode 的 image0 即 @1）。"
-            f"「@名称」绑定是腾讯接入层 PixVerse 模型的能力，H3/VS 不适用"
-            f"（如需给素材起名请直接描述，如「图1：皇后」）")
-
-
-def expand_prompt_refs(prompt: str, ref_image_count: int) -> str:
-    """把 prompt 中的 `@N` / `@图片N` 引用替换为 API 多图格式「图N」（1 基）。
-
-    N 对应参考图（Usage=Reference 的 Image 素材）按提交顺序的第 N 张：
-    IMAGE batch 帧序（BatchImagesNode 的 image0 = 第 1 张 = @1）→ 本地路径 → URL。
-    首/尾帧（FirstFrame/LastFrame）不参与编号，用「首帧」「尾帧」描述。
-    N 越界（<1 或 > ref_image_count）抛 ValueError，避免模型幻觉引用不存在的图。
-    """
+def _expand_refs(s: str, ref_image_count: int) -> str:
+    """@N / @图片N → 图N（1 基，词边界内；越界报错）。"""
     def _repl(m):
-        n = int(m.group(1))
+        n = int(m.group(2))
         if n < 1 or n > ref_image_count:
             raise ValueError(
                 f"prompt 引用了 @{n}，但当前只有 {ref_image_count} 张参考图"
                 f"（@N 从 1 开始，BatchImagesNode 的 image0 即第 1 张）")
         return f"图{n}"
-    return _REF_RE.sub(_repl, prompt or "")
+    return _REF_TOKEN_RE.sub(_repl, s)
+
+
+def _reject_name_refs(s: str) -> None:
+    """拒绝残留的 @名称 / 格式错误引用（PixVerse 专属能力，H3/VS 不适用）。"""
+    for m in _NAME_TOKEN_RE.finditer(s):
+        name = m.group(1)
+        raise ValueError(
+            f"prompt 中的 @{name} 不是有效的素材引用：本节点（H3/VS）仅支持 @N 序号引用"
+            f"（@1=第 1 张参考图，BatchImagesNode 的 image0 即 @1）。"
+            f"「@名称」绑定是腾讯接入层 PixVerse 模型的能力，H3/VS 不适用"
+            f"（如需给素材起名请直接描述，如「图1：皇后」；普通文本中的 @ 请写 \\@）")
+    for m in _GLUE_REF_RE.finditer(s):
+        raise ValueError(
+            f"prompt 中的 {m.group(0)} 格式不正确：@N 序号引用后不能紧跟文字，"
+            f"请加空格或标点（如「@1 皇后」）；本节点（H3/VS）仅支持 @N 序号引用")
+
+
+def normalize_prompt_refs(prompt: str, ref_image_count: int) -> str:
+    """完整素材引用解析（节点与 SDK 的统一入口）：
+
+    1. 暂存 `\@` 字面量（普通文本中的 @，如邮箱）
+    2. 词边界内转换 `@N` / `@图片N` → 「图N」（1 基，越界报错）
+    3. 拒绝残留的 `@名称` 与格式错误引用（Unicode 名称，PixVerse 专属能力）
+    4. 还原字面量 @
+    """
+    if not prompt:
+        return ""
+    s = re.sub(r"\\@", _ESCAPED_AT, prompt)
+    s = _expand_refs(s, ref_image_count)
+    _reject_name_refs(s)
+    return s.replace(_ESCAPED_AT, "@")
+
+
+def expand_prompt_refs(prompt: str, ref_image_count: int) -> str:
+    """兼容入口：仅做 @N → 图N 转换（不拒绝名称引用；词边界语义见 normalize_prompt_refs）。"""
+    if not prompt:
+        return ""
+    return _expand_refs(re.sub(r"\\@", _ESCAPED_AT, prompt), ref_image_count).replace(_ESCAPED_AT, "@")
+
+
+def validate_prompt_refs(prompt: str) -> None:
+    """兼容入口：仅拒绝残留的 @名称 / 格式错误引用（不转换 @N）。"""
+    if not prompt:
+        return
+    _reject_name_refs(prompt)
 
 
 def validate_media_url(url: str, allowed: tuple, what: str):
@@ -1169,6 +1195,9 @@ def run_video_task(cfg, *, mode, prompt, duration, resolution, aspect_ratio,
         "ref_image_paths": ref_image_paths or [], "ref_video_paths": ref_video_paths or [],
         "ref_audio_paths": ref_audio_paths or [], "use_cache": use_cache,
     }
+    # 素材引用归一化：@N → 图N（r2v 按参考图顺序），@名称 拒绝；缓存键用原始 prompt（确定性）
+    ref_image_count = len(ref_image_paths or [])
+    prompt = normalize_prompt_refs(prompt, ref_image_count)
     ck = cache_key(mode, prompt, kwargs)
 
     if use_cache != "Disabled":

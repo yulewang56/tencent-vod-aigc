@@ -45,6 +45,7 @@ from vod_aigc_core import (
     parse_multiline as _parse_multiline,
     expand_prompt_refs as _expand_prompt_refs,
     validate_prompt_refs as _validate_prompt_refs,
+    normalize_prompt_refs as _normalize_prompt_refs,
     annotate_content_refs as _annotate_content_refs,
     validate_media_url as _validate_media_url,
     check_media_quota as _check_media_quota,
@@ -534,6 +535,8 @@ class TencentVODH3ImageToVideo:
             kwargs.get("secret_id"), kwargs.get("secret_key"), kwargs.get("sub_app_id"))
         region = kwargs.get("region") or ""
         endpoint = kwargs.get("endpoint") or ""
+        # 素材引用归一化：i2v 无 Reference 图（首/尾帧不参与编号），@N / @名称 均提交前报错
+        prompt = _normalize_prompt_refs(prompt, 0)
         payload = _build_payload(sub_app_id, prompt, kwargs.get("enhance_prompt", "Disabled"),
                                  kwargs, file_infos=file_infos, input_region=kwargs.get("input_region") or "")
         _set_status(self, "提交 H3 图生视频任务…")
@@ -632,11 +635,10 @@ class TencentVODH3ReferenceToVideo:
         # 素材配额：图≤9 / 视频≤3 / 音频≤3 / 总数≤12 / 音频不能单独 / Base64≤70MB
         _check_media_quota(file_infos, base64_total)
 
-        # @N 引用展开：@1 / @图片1 → 图1（1 基，对应参考图第 N 张，越界报错）
-        prompt = _expand_prompt_refs(prompt, sum(
+        # 素材引用归一化：@N → 图N（1 基），@名称 / 格式错误提交前报错（PixVerse 专属能力）
+        prompt = _normalize_prompt_refs(prompt, sum(
             1 for f in file_infos
             if f.get("Category") == "Image" and f.get("Usage") == "Reference"))
-        _validate_prompt_refs(prompt)  # @名称 绑定仅 PixVerse 支持，H3/VS 报错提示
 
         secret_id, secret_key, sub_app_id = _resolve_credentials(
             kwargs.get("secret_id"), kwargs.get("secret_key"), kwargs.get("sub_app_id"))
@@ -815,11 +817,10 @@ class TencentVODVSVideoTask:
         # 计费要素：是否含视频参考素材（VS 有参考视频时输入/输出两段计费，台账据此查表）
         has_video_ref = any(f.get("Category") == "Video" for f in file_infos)
 
-        # @N 引用展开：@1 / @图片1 → 图1（1 基，对应参考图第 N 张，越界报错）
-        prompt = _expand_prompt_refs(prompt, sum(
+        # 素材引用归一化：@N → 图N（1 基），@名称 / 格式错误提交前报错（PixVerse 专属能力）
+        prompt = _normalize_prompt_refs(prompt, sum(
             1 for f in file_infos
             if f.get("Category") == "Image" and f.get("Usage") == "Reference"))
-        _validate_prompt_refs(prompt)  # @名称 绑定仅 PixVerse 支持，H3/VS 报错提示
 
         # 种子 / 水印 / ExtInfo（未启用不传，保持 payload 干净）
         seed_raw = kwargs.get("seed", -1)
