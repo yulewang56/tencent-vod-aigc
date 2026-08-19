@@ -47,7 +47,7 @@ def p(v, res, ref):
     return core.video_price_for("VS " + v, v, res, ref, example_cfg)
 
 check("pricing: 2.5 no-ref 720P = 1.512", p("2.5", "720P", False) == 1.512)
-check("pricing: 2.5 with-ref 720P = 0.908+0.938", p("2.5", "720P", True) == 0.908 + 0.938)
+check("pricing: 2.5 with-ref 720P = 0.908+0.908", p("2.5", "720P", True) == 0.908 + 0.908)
 check("pricing: 2.0 no-ref 1080P = 2.5", p("2.0", "1080P", False) == 2.5)
 check("pricing: 2.0 with-ref 720P = 0.610+0.610", p("2.0", "720P", True) == 0.610 + 0.610)
 check("pricing: 2.0-fast no-ref 4K = 1.728", p("2.0-fast", "4K", False) == 1.728)
@@ -65,7 +65,7 @@ check("pricing: VS full name wins over empty version",
 # ---- 2. currency：usd 表 / 不跨币种 ----
 cfg_usd = dict(example_cfg)
 cfg_usd["currency"] = "usd"
-check("pricing: usd no-ref 720P = 0.2912", core.video_price_for("VS 2.5", "2.5", "720P", False, cfg_usd) == 0.2912)
+check("pricing: usd no-ref 720P = 0.2312", core.video_price_for("VS 2.5", "2.5", "720P", False, cfg_usd) == 0.2312)
 check("pricing: usd with-ref 720P = 0.1383+0.1383",
       core.video_price_for("VS 2.5", "2.5", "720P", True, cfg_usd) == 0.1383 + 0.1383)
 cfg_mixed = {"currency": "usd", "model_price_tables": {"VS": {"versions": {"2.5": {"cny": {"no_video_ref": {"720P": 1.512}}}}}}}
@@ -101,7 +101,7 @@ check("pricing: estimate_cost legacy unchanged", core.estimate_cost("1080P", 3, 
 check("pricing: estimate_cost legacy keyword-safe",
       core.estimate_cost("1080P", 3, cfg_legacy, model_name="", model_version="", has_video_ref=False) == (5, 1.0))
 sec, cost = core.estimate_cost("720P", 8, example_cfg, model_name="VS 2.5", model_version="2.5", has_video_ref=True)
-check("pricing: estimate_cost VS with-ref 8s", (sec, cost) == (8, round(8 * 1.846, 4)), (sec, cost))
+check("pricing: estimate_cost VS with-ref 8s", (sec, cost) == (8, round(8 * 1.816, 4)), (sec, cost))
 sec2, cost2 = core.estimate_cost("720P", 8, example_cfg, model_name="VS 2.5", model_version="2.5")
 check("pricing: estimate_cost VS no-ref 8s", (sec2, cost2) == (8, round(8 * 1.512, 4)), (sec2, cost2))
 rec_old = core.base_record("t2v", "p", {"resolution": "1080P", "duration": 8}, cfg=cfg_legacy)
@@ -110,7 +110,7 @@ check("pricing: base_record legacy cost unchanged",
 rec_vs = core.base_record("t2v", "p", {"resolution": "720P", "duration": 8, "model": "VS 2.5",
                                        "model_version": "2.5", "has_video_ref": True}, cfg=example_cfg)
 check("pricing: base_record VS cost + model field",
-      rec_vs["estimated_cost"] == round(8 * 1.846, 4) and rec_vs["model"] == "VS 2.5", str(rec_vs))
+      rec_vs["estimated_cost"] == round(8 * 1.816, 4) and rec_vs["model"] == "VS 2.5", str(rec_vs))
 rec_i2v = core.base_record("i2v", "p", {"resolution": "720P", "duration": 8, "model": "VS 2.5",
                                         "model_version": "2.5", "has_video_ref": False}, cfg=example_cfg)
 check("pricing: i2v no-ref uses single segment", rec_i2v["estimated_cost"] == round(8 * 1.512, 4))
@@ -121,14 +121,14 @@ check("pricing: base_record last_frame passthrough",
 rec_h3 = core.base_record("t2v", "p", {"resolution": "1080P", "duration": 5}, cfg=cfg_legacy)
 check("pricing: legacy record has no last_frame key", "last_frame_url" not in rec_h3)
 
-# ---- 5. 两个待复核点（example 按上表原值落盘，README 已标注；这里断言表内原值）----
+# ---- 5. 勘误版价格表关键值（二次勘误 table_20260819 2.csv，此前两个待复核点已修正）----
 vs_tables = example_cfg["model_price_tables"]["VS"]["versions"]
 out_20_cny = vs_tables["2.0"]["cny"]["with_video_ref"]["output"]
-check("review#1: 2.0 cny output 1080P == 2K == 1.820 (待复核)",
-      out_20_cny["1080P"] == 1.820 and out_20_cny["2K"] == 1.820)
+check("pricing: 2.0 cny output 1080P=1.520 2K=1.824 (勘误修正)",
+      out_20_cny["1080P"] == 1.520 and out_20_cny["2K"] == 1.824)
 out_mini_usd = vs_tables["2.0-mini"]["usd"]["with_video_ref"]["output"]
-check("review#2: 2.0-mini usd output 2K=0.0521 < 1080P=0.0584 (待复核)",
-      out_mini_usd["2K"] == 0.0521 and out_mini_usd["1080P"] == 0.0584)
+check("pricing: 2.0-mini usd output 1080P=0.0684 2K=0.0821 (勘误修正, 梯度单调)",
+      out_mini_usd["2K"] == 0.0821 and out_mini_usd["1080P"] == 0.0684 and out_mini_usd["2K"] > out_mini_usd["1080P"])
 
 # ---- 6. VS 节点台账：has_video_ref 传递（带视频参考 vs 不带）----
 hpath = "/tmp/comfy_output/vod_aigc/execution_history.jsonl"
@@ -157,11 +157,11 @@ base_params = {"secret_id": "x", "secret_key": "y", "sub_app_id": "1500044236",
                "filename": "", "region": "ap-guangzhou", "endpoint": "",
                "input_region": "", "poll_interval": 3, "timeout": 60}
 try:
-    # 带视频参考 → 两段求和：8 × (0.908+0.938) = 14.768
+    # 带视频参考 → 两段求和：8 × (0.908+0.908) = 14.528
     nodes.TencentVODVSVideoTask().generate("带视频参考", **{**base_params, "ref_video_urls": "https://x/v.mp4"})
     rec = records[-1]
     check("pricing node: with video ref two-segment sum",
-          rec["estimated_cost"] == round(8 * 1.846, 4) and rec["model"] == "VS 2.5"
+          rec["estimated_cost"] == round(8 * 1.816, 4) and rec["model"] == "VS 2.5"
           and rec["mode"] == "r2v", json.dumps(rec, ensure_ascii=False))
     # 只有图片参考 → 无参考视频单价：8 × 1.512 = 12.096
     nodes.TencentVODVSVideoTask().generate("图片参考", **{**base_params, "ref_image_urls": "https://x/i.png"})
@@ -180,7 +180,7 @@ try:
                                                          "first_frame_url": "https://x/f.png"})
     rec4 = records[-1]
     check("pricing node: video ref + first frame still two-segment",
-          rec4["estimated_cost"] == round(8 * 1.846, 4), str(rec4["estimated_cost"]))
+          rec4["estimated_cost"] == round(8 * 1.816, 4), str(rec4["estimated_cost"]))
 finally:
     nodes._load_config_file = orig_load
     nodes._call_api = orig_call
