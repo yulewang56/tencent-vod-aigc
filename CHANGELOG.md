@@ -1,5 +1,13 @@
 # Changelog
 
+## [v1.16.4] - 2026-08-19
+
+### Added
+- **`@N` 引用提示弹层**（前端扩展）：在 `VOD AIGC - VS 视频生成` / `VOD AIGC - H3 多模态参考生视频`
+  的 prompt 输入框输入 `@` 时弹出可引用候选（`@1`..`@N`），N 从图上 `ref_images` 上游推断
+  （LoadImage=1 张；BatchImagesNode / ImageBatch = 已连接端口数）；点击即插入到光标位置，
+  输入非 `@` 内容自动关闭。已用真实 ComfyUI 实例验证（单图、5 图 batch、点击插入、关闭逻辑）
+
 ## [v1.16.3] - 2026-08-19
 
 ### Added
