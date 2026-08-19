@@ -539,6 +539,60 @@ try:
 except ValueError as e:
     check("material node: empty url rejected", "file_url" in str(e), str(e))
 
+# ---- @N 引用展开（expand_prompt_refs）----
+from vod_aigc_core import expand_prompt_refs as _epr
+check("refs: @1 -> 图1", _epr("@1=皇后", 5) == "图1=皇后")
+check("refs: @图片3 -> 图3", _epr("人物：@图片3=皇后", 5) == "人物：图3=皇后")
+check("refs: mixed @N and 图N passthrough", _epr("图1 场景，@2 角色", 5) == "图1 场景，图2 角色")
+check("refs: no @ unchanged", _epr("普通提示词", 5) == "普通提示词")
+check("refs: empty prompt ok", _epr("", 5) == "")
+check("refs: @1 with 1 image", _epr("@1", 1) == "图1")
+try:
+    _epr("@6=谁", 5)
+    check("refs: out-of-range rejected", False)
+except ValueError as e:
+    check("refs: out-of-range rejected", "5 张参考图" in str(e) and "@6" in str(e), str(e))
+try:
+    _epr("@0", 5)
+    check("refs: @0 rejected", False)
+except ValueError:
+    check("refs: @0 rejected", True)
+
+# VS 节点：@N 在提交前展开为图N（mock _call_api 捕获 payload）
+_orig_call = nodes._call_api
+_captured = {}
+def _fake_call(*a, **kw):
+    _captured["payload"] = a[5] if len(a) > 5 else None
+    raise RuntimeError("stop")  # 只捕获 payload，不继续
+nodes._call_api = _fake_call
+try:
+    _vs_kw = dict(secret_id="x", secret_key="y", sub_app_id="1",
+                  duration=5, resolution="720P", aspect_ratio="9:16",
+                  audio_generation="Enabled", seed=-1, logo_add="Disabled",
+                  high_bitrate="Disabled", return_last_frame="Disabled",
+                  storage_mode="Temporary", use_cache="Disabled", media_name="",
+                  filename="", region="ap-guangzhou", endpoint="", input_region="",
+                  poll_interval=3, timeout=60)
+    try:
+        nodes.TencentVODVSVideoTask().generate("人物：@1=皇后、@2=祺贵人",
+                                               ref_image_urls="https://x/1.png\nhttps://x/2.png",
+                                               **_vs_kw)
+    except RuntimeError:
+        pass
+    p = _captured.get("payload", {})
+    check("vs node: @N expanded in submitted prompt",
+          p.get("Prompt") == "人物：图1=皇后、图2=祺贵人", str(p.get("Prompt"))[:60])
+    check("vs node: payload FileInfos 2 ref images", len(p.get("FileInfos") or []) == 2)
+    try:
+        nodes.TencentVODVSVideoTask().generate("人物：@3=谁",
+                                               ref_image_urls="https://x/1.png\nhttps://x/2.png",
+                                               **_vs_kw)
+        check("vs node: out-of-range @N blocks submit", False)
+    except ValueError as e:
+        check("vs node: out-of-range @N blocks submit", "2 张参考图" in str(e), str(e))
+finally:
+    nodes._call_api = _orig_call
+
 # ---- 汇总 ----
 print()
 print()
