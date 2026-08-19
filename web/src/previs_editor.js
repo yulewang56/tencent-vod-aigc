@@ -51,6 +51,10 @@ app.registerExtension({
   nodeCreated(node) {
     const cls = node.comfyClass || node.type || "";
     if (cls !== NODE_TYPE) return;
+    const fpsWidget = node.widgets?.find((item) => item.name === "fps");
+    if (fpsWidget && (fpsWidget.value === null || fpsWidget.value === undefined || fpsWidget.value === "")) {
+      fpsWidget.value = 24;
+    }
     node.addWidget("button", "打开 3D 预演编辑器", null, () => openEditor(node), {
       serialize: false,
     });
@@ -447,6 +451,7 @@ function safeJson(value, fallback) {
 }
 
 function finite(value, fallback = 0) {
+  if (value === null || value === undefined || value === "") return fallback;
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
 }

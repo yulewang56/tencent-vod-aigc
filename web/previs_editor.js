@@ -35145,6 +35145,10 @@ app.registerExtension({
   nodeCreated(node) {
     const cls = node.comfyClass || node.type || "";
     if (cls !== NODE_TYPE) return;
+    const fpsWidget = node.widgets?.find((item) => item.name === "fps");
+    if (fpsWidget && (fpsWidget.value === null || fpsWidget.value === void 0 || fpsWidget.value === "")) {
+      fpsWidget.value = 24;
+    }
     node.addWidget("button", "\u6253\u5F00 3D \u9884\u6F14\u7F16\u8F91\u5668", null, () => openEditor(node), {
       serialize: false
     });
@@ -35536,6 +35540,7 @@ function safeJson(value, fallback) {
   }
 }
 function finite(value, fallback = 0) {
+  if (value === null || value === void 0 || value === "") return fallback;
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
 }
