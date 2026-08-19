@@ -2661,7 +2661,7 @@ function initializeBezierHandles(track) {
 async function loadBackgroundAsset(path, runtime, viewport, state) {
   viewport.querySelectorAll(".vod-previs__asset-notice").forEach((notice) => notice.remove());
   runtime.clearAssets();
-  if (!path?.trim()) throw new Error("本地资产路径不能为空");
+  if (!path?.trim()) return;
   const cleanPath = path;
   const extension = cleanPath.includes(".") ? cleanPath.split(".").pop().toLowerCase() : "";
   if (!["glb", "gltf", "obj", "ply", "spz"].includes(extension)) {
