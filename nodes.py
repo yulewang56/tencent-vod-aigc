@@ -44,6 +44,7 @@ from vod_aigc_core import (
     extract_asset_id as _extract_asset_id,
     parse_multiline as _parse_multiline,
     expand_prompt_refs as _expand_prompt_refs,
+    validate_prompt_refs as _validate_prompt_refs,
     annotate_content_refs as _annotate_content_refs,
     validate_media_url as _validate_media_url,
     check_media_quota as _check_media_quota,
@@ -556,7 +557,7 @@ class TencentVODH3ReferenceToVideo:
 
     @classmethod
     def INPUT_TYPES(cls):
-        required = {"prompt": ("STRING", {"multiline": True, "default": "", "tooltip": "提示词；引用参考图用 @N 或「图N」（N 从 1 开始，BatchImagesNode 的 image0=第 1 张=@1），例如 @1=皇后、@2=祺贵人"})}
+        required = {"prompt": ("STRING", {"multiline": True, "default": "", "tooltip": "提示词；引用参考图用 @N 或「图N」（N 从 1 开始，BatchImagesNode 的 image0=第 1 张=@1），例如 @1=皇后、@2=祺贵人；仅支持 @N 序号引用（@名称 绑定是 PixVerse 专属能力，H3 不支持，写了会报错）"})}
         optional = dict(_cred_inputs())          # 凭据选填：留空读 tencent-vod-config.json
         optional.update(_output_config_inputs())
         optional["ref_images"] = ("IMAGE", {"tooltip": "参考图，支持批量（batch）：多张图请先合成 batch（如 Load Images / ImageBatch 节点），每帧一张，最多 9 张；帧序即编号（image0=第1张=@1）；也可用 ref_image_urls 传多个 URL"})
@@ -635,6 +636,7 @@ class TencentVODH3ReferenceToVideo:
         prompt = _expand_prompt_refs(prompt, sum(
             1 for f in file_infos
             if f.get("Category") == "Image" and f.get("Usage") == "Reference"))
+        _validate_prompt_refs(prompt)  # @名称 绑定仅 PixVerse 支持，H3/VS 报错提示
 
         secret_id, secret_key, sub_app_id = _resolve_credentials(
             kwargs.get("secret_id"), kwargs.get("secret_key"), kwargs.get("sub_app_id"))
@@ -689,7 +691,7 @@ class TencentVODVSVideoTask:
     @classmethod
     def INPUT_TYPES(cls):
         required = {"prompt": ("STRING", {"multiline": True, "default": "",
-                                           "tooltip": "提示词（必填）；引用参考图用 @N 或「图N」（N 从 1 开始，BatchImagesNode 的 image0=第 1 张=@1），例如 @1=皇后、@2=祺贵人；首尾帧用「首帧」「尾帧」描述"})}
+                                           "tooltip": "提示词（必填）；引用参考图用 @N 或「图N」（N 从 1 开始，BatchImagesNode 的 image0=第 1 张=@1），例如 @1=皇后、@2=祺贵人；首尾帧用「首帧」「尾帧」描述；仅支持 @N 序号引用（@名称 绑定是 PixVerse 专属能力，VS 不支持，写了会报错）"})}
         optional = dict(_cred_inputs())          # 凭据选填：留空读 tencent-vod-config.json
         optional.update(_vs_output_config_inputs())
         optional["model_version"] = (cls._MODEL_VERSIONS, {"default": "2.5",
@@ -817,6 +819,7 @@ class TencentVODVSVideoTask:
         prompt = _expand_prompt_refs(prompt, sum(
             1 for f in file_infos
             if f.get("Category") == "Image" and f.get("Usage") == "Reference"))
+        _validate_prompt_refs(prompt)  # @名称 绑定仅 PixVerse 支持，H3/VS 报错提示
 
         # 种子 / 水印 / ExtInfo（未启用不传，保持 payload 干净）
         seed_raw = kwargs.get("seed", -1)

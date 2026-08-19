@@ -604,6 +604,41 @@ check("annotate: out-of-range kept raw", "content[5]" in _ann_out and "content[5
 check("annotate: empty names passthrough", _acr(_ann_msg, None) == _ann_msg)
 check("annotate: None message ok", _acr(None, _ann_names) == "")
 
+# ---- @名称 引用校验（FileInfos.Text 绑定仅 PixVerse，H3/VS 报错提示）----
+from vod_aigc_core import validate_prompt_refs as _vpr
+check("name-ref: plain @N ok", _vpr("人物：@1=皇后") is None)
+check("name-ref: @图片N ok (compat)", _vpr("场景：@图片1") is None)
+check("name-ref: no @ ok", _vpr("普通提示词") is None)
+check("name-ref: empty ok", _vpr("") is None)
+try:
+    _vpr("人物：@皇后 坐在椅子上")
+    check("name-ref: @皇后 rejected", False)
+except ValueError as e:
+    check("name-ref: @皇后 rejected", "@皇后" in str(e) and "PixVerse" in str(e), str(e)[:60])
+try:
+    _vpr("@Queen walks in")
+    check("name-ref: @Queen rejected", False)
+except ValueError:
+    check("name-ref: @Queen rejected", True)
+try:
+    _vpr("@1=皇后 与 @皇后 混用")
+    check("name-ref: mixed rejected", False)
+except ValueError:
+    check("name-ref: mixed rejected", True)
+
+# VS 节点：@名称 在提交前报错（不产生请求）
+_orig_call2 = nodes._call_api
+try:
+    try:
+        nodes.TencentVODVSVideoTask().generate("人物：@皇后 坐在椅子上",
+                                               ref_image_urls="https://x/1.png",
+                                               **_vs_kw)
+        check("vs node: @名称 blocks submit", False)
+    except ValueError as e:
+        check("vs node: @名称 blocks submit", "@皇后" in str(e), str(e)[:60])
+finally:
+    nodes._call_api = _orig_call2
+
 # ---- 汇总 ----
 print()
 print()
