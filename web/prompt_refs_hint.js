@@ -66,16 +66,16 @@ function onPromptChange(node, widget, el) {
     closeHint();
     return;
   }
-  const count = inferRefImageCount(node);
-  if (count == null) {
+  const names = inferRefImageNames(node);
+  if (names == null) {
     showHint(el || widget.inputEl, m, "无法推断参考图数量：ref_images 未连接或上游为动态数量（可手动输入 @1..@N）");
     return;
   }
-  showCandidates(el || widget.inputEl, m, count);
+  showCandidates(el || widget.inputEl, m, names);
 }
 
-// 从图上推断 ref_images 上游的参考图数量（1 基编号上限）
-function inferRefImageCount(node) {
+// 从图上推断 ref_images 上游的参考图文件名列表（推断不出用 null 占位；无上游返回 null）
+function inferRefImageNames(node) {
   const graph = node.graph;
   if (!graph) return null;
   const input = (node.inputs || []).find((i) => i.name === "ref_images");
@@ -87,31 +87,35 @@ function inferRefImageCount(node) {
   if (!src) return null;
   const cls = src.comfyClass || src.type || "";
 
-  if (cls === "LoadImage") return 1;
-  if (cls === "BatchImagesNode") {
-    // WAS Node Suite：images.image0..imageN 端口，数已连接的
-    let n = 0;
-    for (const inp of src.inputs || []) {
-      if (/^images\.image\d+$/.test(inp.name) && inp.link != null) n++;
+  const nameOf = (up) => {
+    if (!up) return null;
+    return (up.comfyClass || up.type || "") === "LoadImage" ? (up.widgets_values?.[0] || null) : null;
+  };
+
+  if (cls === "LoadImage") return [src.widgets_values?.[0] || null];
+  if (cls === "BatchImagesNode" || cls === "ImageBatch" || cls === "ImageConcatenate") {
+    // 端口命名：BatchImagesNode=images.imageN；内置 ImageBatch=imageN
+    const names = [];
+    for (let i = 0; i < 32; i++) {
+      const inp = (src.inputs || []).find((x) => x.name === `images.image${i}` || x.name === `image${i}`);
+      if (!inp || inp.link == null) break; // 顺序端口：遇未连接即停（假定连续连接）
+      const upLink = links.get(inp.link);
+      const up = upLink ? graph.getNodeById(upLink.origin_id) : null;
+      names.push(nameOf(up));
     }
-    return n || null;
-  }
-  if (cls === "ImageBatch" || cls === "ImageConcatenate") {
-    // 内置拼接：image1..imageN 端口，数已连接的
-    let n = 0;
-    for (const inp of src.inputs || []) {
-      if (/^image\d+$/.test(inp.name) && inp.link != null) n++;
-    }
-    return n || null;
+    return names.length ? names : null;
   }
   // LoadImages 等动态数量节点：返回 null，由运行时确定
   return null;
 }
 
-function showCandidates(el, m, count) {
+function showCandidates(el, m, names) {
   closeHint();
   const items = [];
-  for (let i = 1; i <= count; i++) items.push(`@${i}（第 ${i} 张参考图）`);
+  for (let i = 1; i <= names.length; i++) {
+    const label = names[i - 1] ? `@${i}（${names[i - 1]}）` : `@${i}（第 ${i} 张参考图）`;
+    items.push(label);
+  }
   buildHint(el, m, items, (idx) => `@${idx + 1}`);
 }
 
