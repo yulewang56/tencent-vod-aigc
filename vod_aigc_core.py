@@ -9,7 +9,10 @@ torch；out_dir / ledger_path / config 路径全部参数化，供无头脚本�
 协议：腾讯云 API v3（TC3-HMAC-SHA256 签名），接口 CreateAigcVideoTask /
 CreateAigcImageTask / DescribeTaskDetail / CreateAigcAudioTask /
 DescribeAigcAudioTask（对应《VOD AIGC服务接入指南》3.17 节 Hailuo/H3 生视频、
-3.3.2 节 GEM/Jimeng 生图、3.14 节 GPT-Image2 生图；MPS CreateAigcAudioTask 音乐）。
+3.3.2 节 GEM/Jimeng 生图、3.14 节 GPT-Image2 生图；MPS CreateAigcAudioTask 音乐；
+《VS模型接入使用指南》VS 生视频 + CreateAigcMaterial / DescribeAigcMaterial /
+DeleteAigcMaterial 素材管理 + CreateAigcLivenessValidate /
+DescribeAigcLivenessValidateResult 活体认证）。
 
 接口命名参考管线侧 motion-comic-pipeline/generation/vod_aigc_core.py；行为以
 本仓库 nodes.py 为准（空值过滤策略、报错文案、台账字段等均与节点端逐字一致）。
@@ -64,7 +67,9 @@ _CRED_FILE_HINT = ("custom_nodes/tencent-vod-aigc/tencent-vod-config.json"
 # 结果缓存键：影响输出的参数 / 参考素材引用（与节点端 nodes._cache_key 逐字一致）
 _CACHE_KEY_PARAMS = ("duration", "resolution", "aspect_ratio", "audio_generation",
                      "storage_mode", "enhance_prompt", "media_name", "model",
-                     "output_image_count", "output_format", "lyrics", "is_instrumental")
+                     "output_image_count", "output_format", "lyrics", "is_instrumental",
+                     "model_version", "seed", "logo_add", "ext_info",
+                     "high_bitrate", "return_last_frame")
 _CACHE_KEY_REFS = ("ref_image_urls", "ref_image_paths", "ref_video_paths", "ref_video_urls",
                    "ref_audio_paths", "ref_audio_urls",
                    "first_frame_url", "first_frame_path", "last_frame_url", "last_frame_path",
@@ -330,29 +335,35 @@ def validate_media_url(url: str, allowed: tuple, what: str):
     """提交前校验素材 URL 扩展名：明确不在允许列表时本地报错（避免任务跑完才失败）。
 
     无扩展名/无法解析的 URL 不拦截（交由服务端判断）。
+    asset:// 前缀为素材注册产物引用（VS 素材机制，asset://asset-xxx），无扩展名概念，直接放行。
     """
-    path = urllib.parse.urlparse(url.strip()).path
+    url = (url or "").strip()
+    if url.startswith("asset://"):
+        return
+    path = urllib.parse.urlparse(url).path
     ext = os.path.splitext(path)[1].lower()
     if ext and ext not in allowed:
         raise ValueError(f"{what} 扩展名 \"{ext}\" 不支持，允许: {', '.join(allowed)}（URL: {url[:80]}）")
 
 
-def check_media_quota(file_infos, base64_total=None):
-    """素材配额校验（H3 契约：图≤9 / 视频≤3 / 音频≤3 / 总数≤12 / 音频不能单独 / Base64≤70MB）。
+def check_media_quota(file_infos, base64_total=None, max_images=9, max_videos=3,
+                      max_audios=3, max_total=12):
+    """素材配额校验（默认 H3 契约：图≤9 / 视频≤3 / 音频≤3 / 总数≤12 / 音频不能单独 / Base64≤70MB）。
 
+    VS 模型传 max_images=30 / max_videos=10 / max_audios=10 / max_total=50。
     file_infos 为待提交素材清单（含 Category 字段），违规抛 ValueError（文案与节点端一致）。
     """
     n_images = sum(1 for f in file_infos if f.get("Category") == "Image")
     n_videos = sum(1 for f in file_infos if f.get("Category") == "Video")
     n_audios = sum(1 for f in file_infos if f.get("Category") == "Audio")
-    if n_images > 9:
-        raise ValueError(f"参考图最多 9 张，当前 {n_images} 张")
-    if n_videos > 3:
-        raise ValueError(f"参考视频最多 3 段，当前 {n_videos} 段")
-    if n_audios > 3:
-        raise ValueError(f"参考音频最多 3 段，当前 {n_audios} 段")
-    if n_images + n_videos + n_audios > 12:
-        raise ValueError(f"混合素材总数上限 12 个，当前 {n_images + n_videos + n_audios} 个")
+    if n_images > max_images:
+        raise ValueError(f"参考图最多 {max_images} 张，当前 {n_images} 张")
+    if n_videos > max_videos:
+        raise ValueError(f"参考视频最多 {max_videos} 段，当前 {n_videos} 段")
+    if n_audios > max_audios:
+        raise ValueError(f"参考音频最多 {max_audios} 段，当前 {n_audios} 段")
+    if n_images + n_videos + n_audios > max_total:
+        raise ValueError(f"混合素材总数上限 {max_total} 个，当前 {n_images + n_videos + n_audios} 个")
     if n_audios > 0 and n_images == 0 and n_videos == 0:
         raise ValueError("音频不能单独作为参考输入，必须配图片或视频")
     if base64_total is not None and base64_total > _MAX_BASE64_TOTAL:
@@ -418,15 +429,66 @@ def extract_task_result(detail: dict):
     return (status or "").upper(), err_code, err_code_ext, message, urls
 
 
+def extract_video_and_lastframe(detail: dict):
+    """双产物解析（VS return_last_frame=true）：从任务查询结果中分离视频与尾帧图 URL。
+
+    返回 (video_url, last_frame_url)：Output.FileInfos 中 UsageType=last_frame_url
+    的项为尾帧图，其余（UsageType 为空）为生成的视频；任一缺失返回 None。
+    video_url 恒为第一个非尾帧项，保持现有 extract_task_result urls[0] 的取视频语义。
+    """
+    task_dict = None
+    for key, value in detail.items():
+        if isinstance(value, dict) and re.search(r"(Aigc|SceneAigc)\w*Task$", key):
+            task_dict = value
+            break
+    if task_dict is None:
+        task_dict = detail
+    output = task_dict.get("Output")
+    if not isinstance(output, dict):
+        return None, None
+    video_url, last_frame_url = None, None
+    for item in output.get("FileInfos") or []:
+        if not isinstance(item, dict):
+            continue
+        url = item.get("FileUrl")
+        if not isinstance(url, str) or not url:
+            continue
+        if item.get("UsageType") == "last_frame_url":
+            last_frame_url = url
+        elif video_url is None:
+            video_url = url
+    return video_url, last_frame_url
+
+
+def extract_asset_id(detail: dict) -> str:
+    """从任务查询响应中提取 CreateAigcMaterialTask.Output.AssetId（无则返回 ""）。
+
+    素材注册任务成功后 Output 为 {"AssetId", "AssetUrl", "GroupId"}（无 FileInfos）。
+    """
+    for key, value in detail.items():
+        if isinstance(value, dict) and re.search(r"(Aigc|SceneAigc)\w*Task$", key):
+            output = value.get("Output")
+            if isinstance(output, dict) and output.get("AssetId"):
+                return str(output["AssetId"])
+            return ""
+    output = detail.get("Output")  # 平铺结构兜底（detail 即任务对象）
+    if isinstance(output, dict) and output.get("AssetId"):
+        return str(output["AssetId"])
+    return ""
+
+
 def wait_for_task(secret_id, secret_key, region, endpoint, sub_app_id, task_id,
                   poll_interval, timeout, on_progress=None, task_label="H3 生成中",
                   action="DescribeTaskDetail", err_label="H3",
-                  version=API_VERSION, service=SERVICE, call_api_fn=None) -> dict:
+                  version=API_VERSION, service=SERVICE, call_api_fn=None,
+                  require_urls=True) -> dict:
     """轮询任务直到完成，返回 {"status", "urls", "detail"}。
 
     action 默认 VOD DescribeTaskDetail；MPS 音乐任务传 DescribeAigcAudioTask
     （查询仅 TaskId 一个参数，状态 DONE=成功 / FAIL=失败，错误文案前缀用 err_label）。
     call_api_fn 可注入（默认本模块 call_api），供调用方测试打桩或换传输层。
+    require_urls=False 用于素材注册任务（CreateAigcMaterialTask.Output 为
+    AssetId/AssetUrl 而非 FileInfos[].FileUrl，成功后无 URL 属正常，由调用方提取 AssetId）。
     """
     call_api_fn = call_api_fn or call_api
     deadline = time.time() + timeout
@@ -446,7 +508,8 @@ def wait_for_task(secret_id, secret_key, region, endpoint, sub_app_id, task_id,
                 if err_code or err_code_ext or message:
                     hint = ("（提示词或素材触发内容安全审核，请修改后重试）" if err_code_ext and "Violation" in err_code_ext else "")
                     raise TaskError(task_id, f"{err_label} 任务被拒绝（ErrCode={err_code} ErrCodeExt={err_code_ext or '-'} Message={message or '-'}）TaskId: {task_id} {hint}".rstrip())
-                raise TaskError(task_id, f"任务成功但未找到输出文件 URL（原始响应: {json.dumps(detail, ensure_ascii=False)[:400]}）")
+                if require_urls:
+                    raise TaskError(task_id, f"任务成功但未找到输出文件 URL（原始响应: {json.dumps(detail, ensure_ascii=False)[:400]}）")
             return {"status": status, "urls": urls, "detail": detail}
         if status in ("FAIL", "FAILED", "ERROR"):
             raise TaskError(task_id, f"{err_label} 任务失败 (ErrCode={err_code}): {message or '未知错误'}（TaskId: {task_id}）")
@@ -514,25 +577,40 @@ def download_file(url: str, task_id: str, out_dir: str, name_hint="", on_progres
 
 
 def build_video_payload(sub_app_id, prompt, enhance_prompt, oc_values, file_infos=None,
-                        input_region=""):
-    """构造 CreateAigcVideoTask 请求体（Hailuo / H3）。oc_values 需含 storage_mode /
-    duration / resolution / aspect_ratio / audio_generation，可选 media_name。"""
-    payload = {
-        "SubAppId": int(sub_app_id),
-        "ModelName": "Hailuo",
-        "ModelVersion": "H3",
-        "Prompt": prompt,
-        "EnhancePrompt": enhance_prompt,
-        "OutputConfig": {
-            "StorageMode": oc_values["storage_mode"],
-            "Duration": int(oc_values["duration"]),
-            "Resolution": oc_values["resolution"],
-            "AspectRatio": oc_values["aspect_ratio"],
-            "AudioGeneration": oc_values["audio_generation"],
-        },
+                        input_region="", model_name="Hailuo", model_version="H3",
+                        seed=None, logo_add="", ext_info=""):
+    """构造 CreateAigcVideoTask 请求体（Hailuo / H3 或 VS）。
+
+    oc_values 需含 storage_mode / duration / resolution / aspect_ratio / audio_generation，
+    可选 media_name。model_name / model_version 默认 Hailuo / H3，VS 传 "VS"/版本；
+    seed / logo_add 仅在非空时进 OutputConfig（Seed / LogoAdd）；
+    ext_info 为调用方已双重转义的 JSON 字符串（见 build_ext_info），原样放顶层 ExtInfo；
+    enhance_prompt 为空时不传（VS 无此参数），H3 调用方恒传非空，产出不变。
+    """
+    oc = {
+        "StorageMode": oc_values["storage_mode"],
+        "Duration": int(oc_values["duration"]),
+        "Resolution": oc_values["resolution"],
+        "AspectRatio": oc_values["aspect_ratio"],
+        "AudioGeneration": oc_values["audio_generation"],
     }
     if oc_values.get("media_name"):
-        payload["OutputConfig"]["MediaName"] = oc_values["media_name"]
+        oc["MediaName"] = oc_values["media_name"]
+    if seed is not None:
+        oc["Seed"] = int(seed)
+    if logo_add:
+        oc["LogoAdd"] = logo_add
+    payload = {
+        "SubAppId": int(sub_app_id),
+        "ModelName": model_name,
+        "ModelVersion": model_version,
+        "Prompt": prompt,
+        "OutputConfig": oc,
+    }
+    if enhance_prompt:
+        payload["EnhancePrompt"] = enhance_prompt
+    if ext_info:
+        payload["ExtInfo"] = ext_info
     if file_infos:
         payload["FileInfos"] = file_infos
     if input_region:
@@ -590,6 +668,46 @@ def build_music_payload(prompt, model, oc_values, file_infos=None):
     return payload
 
 
+def build_ext_info(bitrate_mode=None, return_last_frame=None) -> str:
+    """构造 VS ExtInfo（双重转义 JSON 字符串，与文档示例逐字一致）。
+
+    文档示例（高码率）：{"AdditionalParameters":"{\"bitrate_mode\":\"high\"}"}；
+    返回尾帧：{"AdditionalParameters":"{\"return_last_frame\":true}"}。
+    未启用任何参数时返回 ""（调用方不传 ExtInfo）。
+    """
+    additional = {}
+    if bitrate_mode:
+        additional["bitrate_mode"] = str(bitrate_mode)
+    if return_last_frame is not None:
+        additional["return_last_frame"] = bool(return_last_frame)
+    if not additional:
+        return ""
+    return json.dumps({"AdditionalParameters": json.dumps(additional, separators=(",", ":"))},
+                      separators=(",", ":"))
+
+
+def validate_vs_options(model_version, duration, resolution):
+    """VS 模型参数校验：时长 / 分辨率按版本限制（违规抛 ValueError）。
+
+    - 2.0 / 2.0-fast / 2.0-mini：时长 4-15 秒，分辨率 480P/720P/1080P/2K/4K
+    - 2.5：时长 4-30 秒，分辨率 480P/720P/2K/4K（按参数表；更新记录提及 2.5 新增
+      1080P 直出，与参数表有出入，以参数表为准）
+    duration 传 -1 表示由模型自动决定（文档允许，节点层不暴露）。
+    """
+    mv = (model_version or "").strip()
+    if mv == "2.5":
+        max_duration, allowed_res = 30, ("480P", "720P", "2K", "4K")
+    elif mv in ("2.0", "2.0-fast", "2.0-mini"):
+        max_duration, allowed_res = 15, ("480P", "720P", "1080P", "2K", "4K")
+    else:
+        raise ValueError(f"未知 VS ModelVersion: {mv}（可选 2.0 / 2.0-fast / 2.0-mini / 2.5）")
+    d = int(duration)
+    if d != -1 and not (4 <= d <= max_duration):
+        raise ValueError(f"VS {mv} 输出时长需在 4-{max_duration} 秒，当前 {d} 秒")
+    if resolution and resolution not in allowed_res:
+        raise ValueError(f"VS {mv} 不支持分辨率 {resolution}，可选: {', '.join(allowed_res)}")
+
+
 # ---------------------------------------------------------------- 计价
 
 
@@ -616,6 +734,110 @@ def estimate_cost(resolution: str, duration: int, cfg=None) -> tuple:
     """按计费规则估算费用：秒数 = max(时长, 5)，费用 = 秒数 × 单价（元）。"""
     seconds_billed = max(int(duration or 0), _MIN_BILLED_SECONDS)
     return seconds_billed, round(seconds_billed * price_for(resolution, cfg), 4)
+
+
+# ---------------------------------------------------------------- 素材与活体认证 API（VS）
+
+# CreateAigcMaterial / DescribeAigcMaterial / DeleteAigcMaterial /
+# CreateAigcLivenessValidate / DescribeAigcLivenessValidateResult（同步或异步提交）。
+# 素材注册（CreateAigcMaterial）为异步任务：提交返回 TaskId，轮询复用 wait_for_task
+# （DescribeTaskDetail，require_urls=False），成功后用 extract_asset_id 取 AssetId。
+
+
+def create_material(secret_id, secret_key, region, endpoint, sub_app_id, file_url,
+                    asset_type, asset_name, is_real_person, group_id="", group_name="",
+                    group_description="", session_id="", session_context="",
+                    tasks_priority=None, ext_info="", call_api_fn=None) -> str:
+    """提交 CreateAigcMaterial 素材注册任务，返回 TaskId。
+
+    file_url 为素材 URL（http/https 直链）；asset_type 取值 Image/Video/Audio；
+    is_real_person 为 bool（或 "True"/"False" 字符串），真人素材必须提供 group_id
+    （活体认证 DescribeAigcLivenessValidateResult 返回）；非真人 group_id 可留空。
+    轮询由调用方走 wait_for_task（require_urls=False）+ extract_asset_id。
+    call_api_fn 可注入（默认本模块 call_api），供测试打桩。
+    """
+    real = str(is_real_person).strip().lower() == "true"
+    if real and not (group_id or "").strip():
+        raise ValueError("真人素材（is_real_person=True）必须提供 GroupId（先完成活体认证获取）")
+    payload = {
+        "SubAppId": int(sub_app_id),
+        "FileInfo": {"Type": "Url", "Url": file_url},
+        "AssetType": asset_type,
+        "AssetName": asset_name,
+        "IsRealPerson": "True" if real else "False",
+    }
+    if group_id:
+        payload["GroupId"] = group_id
+    if group_name:
+        payload["GroupName"] = group_name
+    if group_description:
+        payload["GroupDescription"] = group_description
+    if session_id:
+        payload["SessionId"] = session_id
+    if session_context:
+        payload["SessionContext"] = session_context
+    if tasks_priority is not None:
+        payload["TasksPriority"] = int(tasks_priority)
+    if ext_info:
+        payload["ExtInfo"] = ext_info
+    response = (call_api_fn or call_api)(secret_id, secret_key, region, endpoint,
+                                         "CreateAigcMaterial", payload)
+    task_id = response.get("TaskId")
+    if not task_id:
+        raise RuntimeError(f"未返回 TaskId（原始响应: {json.dumps(response, ensure_ascii=False)[:400]}）")
+    return task_id
+
+
+def describe_material(secret_id, secret_key, region, endpoint, sub_app_id, asset_id,
+                      call_api_fn=None) -> dict:
+    """查询素材（同步接口 DescribeAigcMaterial），返回 Response。"""
+    if not (asset_id or "").strip():
+        raise ValueError("查询素材需提供 AssetId")
+    return (call_api_fn or call_api)(secret_id, secret_key, region, endpoint,
+                                     "DescribeAigcMaterial",
+                                     {"SubAppId": int(sub_app_id), "AssetId": asset_id.strip()})
+
+
+def delete_material(secret_id, secret_key, region, endpoint, sub_app_id, asset_id="",
+                    group_id="", call_api_fn=None) -> dict:
+    """删除素材（同步接口 DeleteAigcMaterial），asset_id 或 group_id 至少一个。
+
+    传 group_id 时删除该组全部素材。
+    """
+    asset_id, group_id = (asset_id or "").strip(), (group_id or "").strip()
+    if not asset_id and not group_id:
+        raise ValueError("删除素材需提供 AssetId 或 GroupId 至少一个")
+    payload = {"SubAppId": int(sub_app_id)}
+    if asset_id:
+        payload["AssetId"] = asset_id
+    if group_id:
+        payload["GroupId"] = group_id
+    return (call_api_fn or call_api)(secret_id, secret_key, region, endpoint,
+                                     "DeleteAigcMaterial", payload)
+
+
+def create_liveness_validate(secret_id, secret_key, region, endpoint, sub_app_id,
+                             callback_url="", call_api_fn=None) -> dict:
+    """发起活体认证（真人素材前置）：返回 {"H5Link", "LivenessToken"}。
+
+    H5Link 需用户在浏览器完成人脸认证；完成后用 LivenessToken 查询结果。
+    """
+    payload = {"SubAppId": int(sub_app_id)}
+    if callback_url:
+        payload["CallbackUrl"] = callback_url
+    return (call_api_fn or call_api)(secret_id, secret_key, region, endpoint,
+                                     "CreateAigcLivenessValidate", payload)
+
+
+def describe_liveness_validate_result(secret_id, secret_key, region, endpoint,
+                                      sub_app_id, liveness_token, call_api_fn=None) -> dict:
+    """查询活体认证结果：返回含 GroupId 的 Response（认证通过后用于创建真人素材）。"""
+    if not (liveness_token or "").strip():
+        raise ValueError("查询活体认证结果需提供 LivenessToken")
+    return (call_api_fn or call_api)(secret_id, secret_key, region, endpoint,
+                                     "DescribeAigcLivenessValidateResult",
+                                     {"SubAppId": int(sub_app_id),
+                                      "LivenessToken": liveness_token.strip()})
 
 
 # ---------------------------------------------------------------- 缓存与台账
