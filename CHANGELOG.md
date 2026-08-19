@@ -1,5 +1,25 @@
 # Changelog
 
+## [v1.16.0] - 2026-08-19
+
+### Added
+- **VS 视频生成节点**（`VOD AIGC - VS 视频生成`）：腾讯云 VS 模型（2.0 / 2.0-fast / 2.0-mini / 2.5）
+  四模式合一（文生视频 / 首帧 / 首尾帧 / 多模态参考），素材上限 30 图 + 10 视频 + 10 音频（总数 ≤50），
+  支持 Seed / LogoAdd / 高码率（ExtInfo `bitrate_mode=high`）/ 返回尾帧图（`return_last_frame`，双产物下载）、
+  adaptive 宽高比、2.5 版 4-30 秒与 2K/4K 超分直出；含人脸素材支持 `asset://` 引用
+- **创建素材节点**（`VOD AIGC - 创建素材`）：`CreateAigcMaterial` 素材注册（URL → 异步任务 → 输出
+  `asset://asset-xxx`），VS 人脸素材前置；真人素材需 GroupId（活体认证走 core API）
+- **素材与活体 API**（core）：`create_material` / `describe_material` / `delete_material` /
+  `create_liveness_validate` / `describe_liveness_validate_result`
+- **价格配置重构**：新增 `model_price_tables` 多维价格表（模型 × 版本 × 有无视频参考 × 输入/输出两段计费 ×
+  分辨率 × 国内/国际站币种），`currency` 顶层语义；VS 台账按「无参考单段 / 有参考 input+output 两段求和」计费；
+  旧 `prices` / `image_prices` 字段完全兼容（H3 / 生图零变化）
+
+### 变更
+- `build_video_payload` 参数化（`model_name` / `model_version` / `seed` / `logo_add` / `ext_info`），
+  默认参数下 H3 payload 逐字节一致（测试锁定）
+- `check_media_quota` 配额参数化（默认 9/3/3/12 保持 H3 契约，VS 用 30/10/10/50）
+
 ## [v1.15.0] - 2026-08-19
 
 ### Added
