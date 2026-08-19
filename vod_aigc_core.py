@@ -181,9 +181,11 @@ def load_config(config_path=None):
 
     config_path 为文件路径（None 返回空结构，供无配置调用方）。
     返回 {"secret_id", "secret_key", "sub_app_id",
-          "prices": {分辨率: 单价}, "image_prices": {模型: 单价}}。
+          "prices": {分辨率: 单价}, "image_prices": {模型: 单价},
+          "currency": 币种（默认 "cny"）, "model_price_tables": 模型计价表（原样透传）}。
     """
-    empty = {"secret_id": "", "secret_key": "", "sub_app_id": "", "prices": {}, "image_prices": {}}
+    empty = {"secret_id": "", "secret_key": "", "sub_app_id": "", "prices": {}, "image_prices": {},
+             "currency": "cny", "model_price_tables": {}}
     if not config_path:
         return empty
     try:
@@ -211,6 +213,9 @@ def load_config(config_path=None):
                 result["image_prices"][k] = float(v)
             except (TypeError, ValueError):
                 pass
+    result["currency"] = ((data.get("currency") or "cny").strip().lower() or "cny")
+    tables = data.get("model_price_tables")
+    result["model_price_tables"] = tables if isinstance(tables, dict) else {}
     return result
 
 
@@ -719,6 +724,45 @@ def price_for(resolution: str, cfg=None) -> float:
         return 0.0
 
 
+def _table_rate(table, key: str, resolution: str) -> float:
+    """从计价表子结构取 {分辨率: 单价} 的单档价格；结构缺失/数值非法返回 0。"""
+    try:
+        return float(((table or {}).get(key) or {}).get(resolution) or 0)
+    except (TypeError, ValueError, AttributeError):
+        return 0.0
+
+
+def video_price_for(model_name, model_version, resolution, has_video_ref, cfg=None) -> float:
+    """视频单价（元/秒，按模型计价表）；未配置返回 0。cfg 为 load_config 的结果。
+
+    VS（model_price_tables.VS.versions.<version>.<currency>）计费规则：
+    - 无参考视频：no_video_ref[res]（单段单价）
+    - 有参考视频：with_video_ref.input[res] + with_video_ref.output[res]（输入/输出两段求和）
+    model_name 接受 "VS" 或 "VS 2.5"（含版本时按空格切分）；其他模型名/空回退旧
+    prices[res]（H3 等旧模型兼容）。币种严格按 cfg.currency（默认 cny）取——版本、
+    分辨率或币种缺失返回 0，不回退旧表、不跨币种混用。
+    """
+    name = (model_name or "").strip()
+    ver = (model_version or "").strip()
+    if " " in name:
+        name, _, inlined = name.partition(" ")
+        ver = ver or inlined.strip()
+    if name != "VS":
+        return price_for(resolution, cfg)
+    versions = (((cfg or {}).get("model_price_tables") or {}).get("VS") or {}).get("versions") or {}
+    rates = versions.get(ver)
+    if not rates:
+        return 0.0
+    cur = ((cfg or {}).get("currency") or "cny").strip().lower() or "cny"
+    table = rates.get(cur)
+    if not table:
+        return 0.0
+    if has_video_ref:
+        wvr = table.get("with_video_ref") or {}
+        return _table_rate(wvr, "input", resolution) + _table_rate(wvr, "output", resolution)
+    return _table_rate(table, "no_video_ref", resolution)
+
+
 def image_price_for(model: str, cfg=None) -> float:
     """生图单价（元/张，按模型）；未配置返回 0。cfg 为 load_config 的结果（None 视为空）。
 
@@ -730,10 +774,16 @@ def image_price_for(model: str, cfg=None) -> float:
         return 0.0
 
 
-def estimate_cost(resolution: str, duration: int, cfg=None) -> tuple:
-    """按计费规则估算费用：秒数 = max(时长, 5)，费用 = 秒数 × 单价（元）。"""
+def estimate_cost(resolution: str, duration: int, cfg=None, model_name="",
+                  model_version="", has_video_ref=False) -> tuple:
+    """按计费规则估算费用：秒数 = max(时长, 5)，费用 = 秒数 × 单价（元）。
+
+    model_name / model_version / has_video_ref 供 VS 计价表（model_price_tables）使用；
+    旧调用（H3 等）不传时单价走 prices[res]，行为与旧版完全一致。
+    """
     seconds_billed = max(int(duration or 0), _MIN_BILLED_SECONDS)
-    return seconds_billed, round(seconds_billed * price_for(resolution, cfg), 4)
+    rate = video_price_for(model_name, model_version, resolution, has_video_ref, cfg)
+    return seconds_billed, round(seconds_billed * rate, 4)
 
 
 # ---------------------------------------------------------------- 素材与活体认证 API（VS）
@@ -885,10 +935,15 @@ def base_record(mode: str, prompt: str, kwargs: dict, task_id="", url="", path="
         model, image_count = kwargs.get("model") or "", 0
         seconds_billed, estimated_cost = 0, 0.0  # 音乐生成不计秒不计费
     else:
-        model, image_count = "", 0
-        seconds_billed, estimated_cost = estimate_cost(kwargs.get("resolution") or "",
-                                                       kwargs.get("duration") or 0, cfg)
-    return {
+        # 视频按秒计费：H3 等旧模型走 prices[res]；VS 走 model_price_tables
+        # （kwargs.model 形如 "VS 2.5"，has_video_ref 由 VS 节点注入）
+        model = kwargs.get("model") or ""
+        image_count = 0
+        seconds_billed, estimated_cost = estimate_cost(
+            kwargs.get("resolution") or "", kwargs.get("duration") or 0, cfg,
+            model_name=model, model_version=kwargs.get("model_version") or "",
+            has_video_ref=bool(kwargs.get("has_video_ref")))
+    record = {
         "mode": mode,
         "task_id": task_id,
         "status": "failure" if error else "success",
@@ -910,6 +965,11 @@ def base_record(mode: str, prompt: str, kwargs: dict, task_id="", url="", path="
         "cached": cached,
         "error": (error or "")[:500],
     }
+    # VS 尾帧图等扩展字段透传（仅调用方传入时出现；H3 等路径无这些键，记录结构不变）
+    for k in ("last_frame_url", "last_frame_path"):
+        if kwargs.get(k):
+            record[k] = kwargs[k]
+    return record
 
 
 def append_history(record: dict, ledger_path: str):
