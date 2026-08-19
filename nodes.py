@@ -299,13 +299,14 @@ def _ledger(mode):
                     _append_history(rec)
                     return (task_id, url, path)
             try:
-                original = fn(self, prompt, **kwargs)  # 元组，或 {"ui": ..., "result": ...} 字典（生图预览 / VS 尾帧信息）
+                original = fn(self, prompt, **kwargs)  # 元组，或 {"ui": ..., "result": ...} 字典（生图预览 / VS 尾帧与计费信息）
                 result = original.get("result") if isinstance(original, dict) else original
                 task_id, url, path = result[0], result[1], result[2]
-                rec = _base_record(m, prompt, kwargs, task_id, url, path, cache_key=ck)
                 if isinstance(original, dict):
-                    rec.update({k: v for k, v in original.items() if k not in ("result", "ui")})
-                _append_history(rec)
+                    # 额外键（VS model/has_video_ref 计费要素、尾帧图信息）先并入 kwargs，
+                    # 供 base_record 计费与扩展字段透传；缓存键在 fn 执行前已算好，不受影响
+                    kwargs.update({k: v for k, v in original.items() if k not in ("result", "ui")})
+                _append_history(_base_record(m, prompt, kwargs, task_id, url, path, cache_key=ck))
                 return original  # 字典返回需原样保留 ui（预览协议）
             except Exception as e:
                 _append_history(_base_record(m, prompt, kwargs,
@@ -746,6 +747,8 @@ class TencentVODVSVideoTask:
         # 素材配额（VS 上限：图≤30 / 视频≤10 / 音频≤10 / 总数≤50 / 音频不能单独 / Base64≤70MB）
         _check_media_quota(file_infos, base64_total, max_images=30, max_videos=10,
                            max_audios=10, max_total=50)
+        # 计费要素：是否含视频参考素材（VS 有参考视频时输入/输出两段计费，台账据此查表）
+        has_video_ref = any(f.get("Category") == "Video" for f in file_infos)
 
         # 种子 / 水印 / ExtInfo（未启用不传，保持 payload 干净）
         seed_raw = kwargs.get("seed", -1)
@@ -785,7 +788,8 @@ class TencentVODVSVideoTask:
         _set_status(self, "下载视频…")
         path = _download_video(url, task_id, on_progress=lambda t: _set_status(self, t),
                                name_hint=kwargs.get("filename"))
-        out = {"result": (task_id, url, path)}
+        out = {"result": (task_id, url, path),
+               "model": f"VS {model_version}", "has_video_ref": has_video_ref}
         if last_frame_url:
             _set_status(self, "下载尾帧图…")
             lf_path = _download_video(last_frame_url, task_id,
