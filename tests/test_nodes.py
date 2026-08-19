@@ -107,6 +107,18 @@ check("previs: legacy outputs remain prefix",
 check("previs: integrated scene fields appended",
       list(previs_inputs["optional"])[-4:] == [
           "scene_source", "background_transform", "generated_task_id", "render_cache_path"])
+uploaded_asset_path = nodes._previs_uploaded_asset_path(
+    r"C:\fakepath\../示例 场景.SPZ", "a" * 32)
+check("previs: local asset upload path is confined and sanitized",
+      uploaded_asset_path == "/tmp/comfy_input/vod_aigc/previs_assets/"
+      + "aaaaaaaaaaaa_示例_场景.spz",
+      uploaded_asset_path)
+try:
+    nodes._previs_uploaded_asset_path("../../scene.fbx", "b" * 32)
+    check("previs: unsupported local asset upload rejected", False)
+except ValueError as error:
+    check("previs: unsupported local asset upload rejected",
+          "不支持的 3D 资产格式" in str(error), str(error))
 
 # ---- 2. TC3 signing ----
 headers, body = nodes._sign_request("AKIDtest123", "secretKey456", "ap-guangzhou",

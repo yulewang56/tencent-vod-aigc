@@ -383,6 +383,10 @@ html[data-theme="dark"] {
   padding: 6px;
   text-align: center;
 }
+.vod-previs__upload--asset {
+  display: block;
+  margin-bottom: 7px;
+}
 .vod-previs__upload input { display: none; }
 .vod-previs__status {
   border-left: 3px solid var(--cp-accent);
@@ -2056,6 +2060,35 @@ async function submitWorldGeneration(state) {
   }
 }
 
+async function uploadLocalAsset(file, state) {
+  if (!file) return;
+  state.generation.status = "submitting";
+  state.generation.message = `正在上传本地场景：${file.name}`;
+  state.refreshInspector?.();
+  try {
+    const form = new FormData();
+    form.set("asset", file, file.name);
+    const uploaded = await responseJson(await fetch(
+      "/tencent-vod-aigc/previs/assets",
+      { method: "POST", headers: PREVIS_REQUEST_HEADER, body: form },
+    ));
+    state.background.source = "Local Asset";
+    state.background.path = uploaded.path;
+    state.background.taskId = "";
+    invalidateRenderCache(state);
+    state.generation.status = "loading";
+    state.generation.message = `正在加载本地场景：${uploaded.name}`;
+    state.refreshInspector?.();
+    await state.loadBackground?.(uploaded.path);
+    state.generation.status = "complete";
+    state.generation.message = `已加载本地场景：${uploaded.name}`;
+  } catch (error) {
+    state.generation.status = "error";
+    state.generation.message = error.message;
+  }
+  state.refreshInspector?.();
+}
+
 function renderSceneSourcePanel(container, state, runtime) {
   const details = element("details", "vod-previs__scene-source");
   details.open = state.generation.status !== "idle" || !state.background.path;
@@ -2080,22 +2113,46 @@ function renderSceneSourcePanel(container, state, runtime) {
     },
   ));
   if (state.background.source === "Local Asset") {
+    const upload = element("label", "vod-previs__upload vod-previs__upload--asset");
+    const uploadInput = document.createElement("input");
+    uploadInput.type = "file";
+    uploadInput.accept = ".glb,.gltf,.obj,.ply,.spz";
+    uploadInput.addEventListener("change", () => {
+      const file = uploadInput.files?.[0];
+      if (file) uploadLocalAsset(file, state);
+    });
+    upload.append(
+      uploadInput,
+      textElement("div", "", "选择并加载本地 3D 文件"),
+      textElement("div", "", "GLB / GLTF / OBJ / PLY / SPZ（推荐 GLB 或 SPZ）"),
+    );
+    details.appendChild(upload);
     details.appendChild(textInput(
-      "本地资产路径（GLB / GLTF / OBJ / PLY / SPZ）",
+      "或填写 ComfyUI input / output / temp 内的资产路径",
       state.background.path,
       (value) => {
         state.background.path = value.trim();
+        state.background.taskId = "";
         invalidateRenderCache(state);
       },
     ));
-    details.appendChild(button("加载本地场景", async () => {
+    details.appendChild(button("加载路径中的场景", async () => {
       try {
+        if (!state.background.path.trim()) {
+          throw new Error("请先选择本地 3D 文件，或填写允许访问的资产路径");
+        }
+        state.generation.status = "loading";
+        state.generation.message = "正在加载本地场景…";
+        state.refreshInspector?.();
         await state.loadBackground?.(state.background.path);
+        state.generation.status = "complete";
+        state.generation.message = `已加载本地场景：${
+          state.background.path.split(/[\\/]/).pop()}`;
       } catch (error) {
         state.generation.status = "error";
         state.generation.message = error.message;
-        state.refreshInspector?.();
       }
+      state.refreshInspector?.();
     }, true));
   }
   if (state.background.source === "Tencent VOD Generated") {
@@ -2604,7 +2661,7 @@ function initializeBezierHandles(track) {
 async function loadBackgroundAsset(path, runtime, viewport, state) {
   viewport.querySelectorAll(".vod-previs__asset-notice").forEach((notice) => notice.remove());
   runtime.clearAssets();
-  if (!path) return;
+  if (!path?.trim()) throw new Error("本地资产路径不能为空");
   const cleanPath = path;
   const extension = cleanPath.includes(".") ? cleanPath.split(".").pop().toLowerCase() : "";
   if (!["glb", "gltf", "obj", "ply", "spz"].includes(extension)) {

@@ -329,6 +329,8 @@ _PREVIS_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 _PREVIS_JOB_LOCK = threading.Lock()
 _PREVIS_WORLD_JOBS = {}
 _PREVIS_RENDER_SESSIONS = {}
+_PREVIS_BROWSER_ASSET_EXTS = {".glb", ".gltf", ".obj", ".ply", ".spz"}
+_MAX_PREVIS_ASSET_BYTES = 1024 * 1024 * 1024
 
 
 def _previs_root(kind, identifier, base_dir=None):
@@ -336,6 +338,24 @@ def _previs_root(kind, identifier, base_dir=None):
         raise ValueError("无效的预演任务 ID")
     root = base_dir or folder_paths.get_output_directory()
     return os.path.join(root, "vod_aigc", kind, identifier)
+
+
+def _previs_uploaded_asset_path(filename, identifier=None):
+    raw_name = str(filename or "").replace("\\", "/").split("/")[-1].strip()
+    stem, extension = os.path.splitext(raw_name)
+    extension = extension.lower()
+    if extension not in _PREVIS_BROWSER_ASSET_EXTS:
+        formats = ", ".join(sorted(_PREVIS_BROWSER_ASSET_EXTS))
+        raise ValueError(f"不支持的 3D 资产格式；请选择 {formats}")
+    safe_stem = "".join(
+        character if character.isalnum() or character in ("-", "_") else "_"
+        for character in stem)[:96].strip("_") or "asset"
+    upload_id = identifier or uuid.uuid4().hex
+    if not _PREVIS_ID_RE.fullmatch(upload_id):
+        raise ValueError("无效的本地资产上传 ID")
+    directory = os.path.join(
+        folder_paths.get_input_directory(), "vod_aigc", "previs_assets")
+    return os.path.join(directory, f"{upload_id[:12]}_{safe_stem}{extension}")
 
 
 def _previs_update_job(job_id, **values):
@@ -1351,6 +1371,60 @@ def _register_http_routes():
             return web.json_response({"error": "3D 资产不存在"}, status=404)
         return web.FileResponse(path, headers={"Content-Disposition": "inline"})
 
+    async def previs_asset_upload(request):
+        if not previs_mutation_allowed(request):
+            return previs_forbidden()
+        if not request.content_type.startswith("multipart/"):
+            return web.json_response(
+                {"ok": False, "error": "本地资产上传必须使用 multipart/form-data"},
+                status=400)
+        path = ""
+        partial_path = ""
+        try:
+            reader = await request.multipart()
+            async for part in reader:
+                if part.name != "asset":
+                    continue
+                if path:
+                    raise ValueError("每次只能上传一个 3D 资产")
+                path = _previs_uploaded_asset_path(part.filename)
+                partial_path = f"{path}.part"
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                size = 0
+                with open(partial_path, "wb") as handle:
+                    while True:
+                        chunk = await part.read_chunk()
+                        if not chunk:
+                            break
+                        size += len(chunk)
+                        if size > _MAX_PREVIS_ASSET_BYTES:
+                            raise ValueError("3D 资产超过 1GB 上限")
+                        handle.write(chunk)
+                if size == 0:
+                    raise ValueError("3D 资产文件为空")
+                os.replace(partial_path, path)
+                partial_path = ""
+            if not path:
+                raise ValueError("请选择要上传的 3D 资产")
+            return web.json_response({
+                "ok": True,
+                "path": path,
+                "name": os.path.basename(path),
+                "size": os.path.getsize(path),
+            })
+        except ValueError as error:
+            for candidate in (partial_path, path):
+                if candidate and os.path.isfile(candidate):
+                    os.remove(candidate)
+            return web.json_response({"ok": False, "error": str(error)}, status=400)
+        except OSError as error:
+            for candidate in (partial_path, path):
+                if candidate and os.path.isfile(candidate):
+                    os.remove(candidate)
+            return web.json_response(
+                {"ok": False, "error": f"保存本地 3D 资产失败: {error}"},
+                status=500)
+
     async def previs_world_create(request):
         if not previs_mutation_allowed(request):
             return previs_forbidden()
@@ -1570,6 +1644,7 @@ def _register_http_routes():
     routes.get("/tencent-vod-aigc/config")(config_status)
     routes.post("/tencent-vod-aigc/config")(config_save)
     routes.get("/tencent-vod-aigc/asset")(local_3d_asset)
+    routes.post("/tencent-vod-aigc/previs/assets")(previs_asset_upload)
     routes.post("/tencent-vod-aigc/previs/world-tasks")(previs_world_create)
     routes.get("/tencent-vod-aigc/previs/world-tasks/{job_id}")(previs_world_status)
     routes.post("/tencent-vod-aigc/previs/renders")(previs_render_create)

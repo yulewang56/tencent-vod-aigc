@@ -169,6 +169,9 @@ cp tencent-vod-config.example.json tencent-vod-config.json
 - 同一个编辑器内提供 `Blank / Local Asset / Tencent VOD Generated` 三种场景来源；云端模式
   可上传 1-3 张参考图并输入 Prompt，只有勾选付费确认后才能提交，前端持续显示任务状态，完成后
   自动下载并进入当前编辑空间
+- `Local Asset` 可直接选择单个 GLB/GLTF/OBJ/PLY/SPZ 文件；文件会保存到
+  `ComfyUI/input/vod_aigc/previs_assets`，路径自动回填并加载。也可手工填写
+  ComfyUI `input/output/temp` 内的绝对路径；GLTF/OBJ 如依赖外部贴图或二进制文件，建议先打包为 GLB
 - 点击节点上的「打开 3D 预演编辑器」进入 Three.js WebGL 主视窗；人物使用球体/胶囊/
   圆柱组合的立体 humanoid 简模，体块和球体也是实际 3D mesh
 - SPZ 使用本地打包的 Spark 2.1.0 在主视窗和摄影机观察窗原生渲染；GLB/GLTF/OBJ/PLY
