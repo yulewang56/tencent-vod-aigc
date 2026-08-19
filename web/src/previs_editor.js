@@ -48,19 +48,32 @@ const DEFAULT_CAMERA = {
 
 app.registerExtension({
   name: "TencentVODAIGC.PrevisEditor",
+  beforeRegisterNodeDef(nodeType, nodeData) {
+    if (nodeData?.name !== NODE_TYPE) return;
+    const originalOnConfigure = nodeType.prototype.onConfigure;
+    nodeType.prototype.onConfigure = function (...args) {
+      const result = originalOnConfigure?.apply(this, args);
+      queueMicrotask(() => migrateNodeDefaults(this));
+      return result;
+    };
+  },
   nodeCreated(node) {
     const cls = node.comfyClass || node.type || "";
     if (cls !== NODE_TYPE) return;
-    const fpsWidget = node.widgets?.find((item) => item.name === "fps");
-    if (fpsWidget && (fpsWidget.value === null || fpsWidget.value === undefined || fpsWidget.value === "")) {
-      fpsWidget.value = 24;
-    }
+    migrateNodeDefaults(node);
     node.addWidget("button", "打开 3D 预演编辑器", null, () => openEditor(node), {
       serialize: false,
     });
     node.size = [Math.max(node.size?.[0] || 320, 420), node.size?.[1] || 560];
   },
 });
+
+function migrateNodeDefaults(node) {
+  const fpsWidget = node.widgets?.find((item) => item.name === "fps");
+  if (fpsWidget && (fpsWidget.value === null || fpsWidget.value === undefined || fpsWidget.value === "")) {
+    fpsWidget.value = 24;
+  }
+}
 
 function ensureTheme() {
   const param = new URLSearchParams(window.location.search).get("clawpilotTheme");

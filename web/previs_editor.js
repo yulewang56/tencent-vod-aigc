@@ -35142,19 +35142,31 @@ var DEFAULT_CAMERA = {
 };
 app.registerExtension({
   name: "TencentVODAIGC.PrevisEditor",
+  beforeRegisterNodeDef(nodeType, nodeData) {
+    if (nodeData?.name !== NODE_TYPE) return;
+    const originalOnConfigure = nodeType.prototype.onConfigure;
+    nodeType.prototype.onConfigure = function(...args) {
+      const result = originalOnConfigure?.apply(this, args);
+      queueMicrotask(() => migrateNodeDefaults(this));
+      return result;
+    };
+  },
   nodeCreated(node) {
     const cls = node.comfyClass || node.type || "";
     if (cls !== NODE_TYPE) return;
-    const fpsWidget = node.widgets?.find((item) => item.name === "fps");
-    if (fpsWidget && (fpsWidget.value === null || fpsWidget.value === void 0 || fpsWidget.value === "")) {
-      fpsWidget.value = 24;
-    }
+    migrateNodeDefaults(node);
     node.addWidget("button", "\u6253\u5F00 3D \u9884\u6F14\u7F16\u8F91\u5668", null, () => openEditor(node), {
       serialize: false
     });
     node.size = [Math.max(node.size?.[0] || 320, 420), node.size?.[1] || 560];
   }
 });
+function migrateNodeDefaults(node) {
+  const fpsWidget = node.widgets?.find((item) => item.name === "fps");
+  if (fpsWidget && (fpsWidget.value === null || fpsWidget.value === void 0 || fpsWidget.value === "")) {
+    fpsWidget.value = 24;
+  }
+}
 function ensureTheme() {
   const param = new URLSearchParams(window.location.search).get("clawpilotTheme");
   const theme = param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
