@@ -1,5 +1,14 @@
 # Changelog
 
+## [v1.16.2] - 2026-08-19
+
+### 修复
+- **节点包加载修复补完**（v1.16.1 的绝对导入修复不完整）：ComfyUI 主程序本身就是
+  `nodes.py`，已占用顶层模块名 `nodes`，`from nodes import ...` 会静默解析到
+  ComfyUI **全局节点注册表**而非本包节点——加载显示成功（0.0s 无报错）但 VOD 节点仍缺失。
+  改为用独立模块名 `tencent_vod_aigc_nodes` 经 `spec_from_file_location` 显式加载本包
+  `nodes.py`；已用完整 ComfyUI 实例验证 **10 个节点全部注册**（含 VS 视频生成/创建素材）
+
 ## [v1.16.1] - 2026-08-19
 
 ### 修复
