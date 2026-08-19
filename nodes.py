@@ -1,4 +1,11 @@
-"""腾讯云 VOD AIGC（MiniMax Hailuo H3 生视频）ComfyUI 自定义节点。
+"""腾讯云 VOD AIGC（MiniMax Hailuo H3 生视频）ComfyUI 自定义节点（薄壳）。
+
+全部纯逻辑（TC3 签名、API 调用、payload 构造、轮询、下载、缓存、计价、台账）
+在 vod_aigc_core.py（纯标准库，无头可跑）。本文件仅保留：
+- 节点类定义 / INPUT_TYPES / RETURN_* / FUNCTION / CATEGORY / 显示名 / tooltip / UI 默认值
+- IMAGE tensor 转换与 folder_paths 相关路径处理
+- 模块级委托函数（_call_api / _wait_for_task / _download_video 等）：运行时解析本模块
+  命名空间，供测试打桩（monkey-patch）与节点类调用
 
 协议：腾讯云 API v3（TC3-HMAC-SHA256 签名），接口 CreateAigcVideoTask / DescribeTaskDetail。
 仅依赖 Python 标准库 + ComfyUI 自带的 numpy/Pillow/torch，无需额外 pip 安装。
@@ -8,19 +15,35 @@
 
 import base64
 import functools
-import hashlib
-import hmac
 import io
 import json
 import os
-import re
-import time
-import urllib.error
 import urllib.parse
 import urllib.request
 
 import numpy as np
 from PIL import Image
+
+import vod_aigc_core as core
+from vod_aigc_core import (
+    SERVICE, API_VERSION, DEFAULT_ENDPOINT, DEFAULT_REGION,
+    MPS_SERVICE, MPS_API_VERSION, MPS_ENDPOINT,
+    RESOLUTIONS, ASPECT_RATIOS, ON_OFF, STORAGE_MODES, MUSIC_MODELS,
+    _MAX_IMAGE_BYTES, _MAX_VIDEO_BYTES, _MAX_AUDIO_BYTES, _MAX_BASE64_TOTAL,
+    _ALLOWED_VIDEO_EXTS, _ALLOWED_IMAGE_EXTS, _ALLOWED_AUDIO_EXTS,
+    _CONFIG_FILE,
+    TaskError,
+    _hmac_sha256, _canonical_headers, _sign_request,
+    build_video_payload as _build_payload,
+    build_image_payload as _build_image_payload,
+    build_music_payload as _build_music_payload,
+    extract_task_result as _extract_task_result,
+    parse_multiline as _parse_multiline,
+    validate_media_url as _validate_media_url,
+    check_media_quota as _check_media_quota,
+    save_config_file as _save_config_file,
+    cache_key as _cache_key,
+)
 
 # folder_paths 在不同 ComfyUI 版本位置不同：经典版是仓库根目录的顶层模块，新版在 comfy 包内
 try:
@@ -28,182 +51,60 @@ try:
 except ImportError:
     import folder_paths
 
-# ---------------------------------------------------------------- 常量
 
-SERVICE = "vod"
-API_VERSION = "2018-07-17"
-DEFAULT_ENDPOINT = "vod.tencentcloudapi.com"
-DEFAULT_REGION = "ap-guangzhou"
+# ---------------------------------------------------------------- 模块级委托（测试可打桩）
 
-# MPS（媒体处理）AIGC 音乐生成：CreateAigcAudioTask / DescribeAigcAudioTask
-MPS_SERVICE = "mps"
-MPS_API_VERSION = "2019-06-12"
-MPS_ENDPOINT = "mps.tencentcloudapi.com"
-
-RESOLUTIONS = ["768P", "1080P", "2K", "4K"]
-ASPECT_RATIOS = ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"]
-ON_OFF = ["Enabled", "Disabled"]
-STORAGE_MODES = ["Temporary", "Permanent"]
-
-_MAX_IMAGE_BYTES = 30 * 1024 * 1024      # 单张图片 ≤30MB（文档限制）
-_MAX_VIDEO_BYTES = 50 * 1024 * 1024      # 单个视频 ≤50MB（文档限制）
-_MAX_AUDIO_BYTES = 15 * 1024 * 1024      # 单个音频 ≤15MB（文档限制）
-_MAX_BASE64_TOTAL = 70 * 1024 * 1024     # Base64 传参总大小 ≤70MB（文档限制）
-
-# ---------------------------------------------------------------- TC3 签名
-
-def _hmac_sha256(key: bytes, msg: str) -> bytes:
-    return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
+def _call_api(secret_id: str, secret_key: str, region: str, endpoint: str, action: str,
+              payload: dict, version=API_VERSION, service=SERVICE) -> dict:
+    """调用腾讯云接口，返回 Response 对象；业务错误抛 RuntimeError（委托 core.call_api）。"""
+    return core.call_api(secret_id, secret_key, region, endpoint, action, payload,
+                         version=version, service=service)
 
 
-def _canonical_headers(headers: dict, action: str) -> str:
-    """TC3 规范：canonical headers 中 x-tc-action 的值必须为小写（HTTP 头保持原样）。"""
-    parts = []
-    for key in sorted(headers.keys()):
-        value = action.lower() if key.lower() == "x-tc-action" else str(headers[key]).strip()
-        parts.append(f"{key.lower()}:{value}\n")
-    return "".join(parts)
+def _wait_for_task(secret_id, secret_key, region, endpoint, sub_app_id, task_id,
+                   poll_interval, timeout, on_progress=None, task_label="H3 生成中",
+                   action="DescribeTaskDetail", err_label="H3",
+                   version=API_VERSION, service=SERVICE) -> dict:
+    """轮询任务直到完成（委托 core.wait_for_task；注入本模块 _call_api 供测试打桩）。"""
+    return core.wait_for_task(secret_id, secret_key, region, endpoint, sub_app_id, task_id,
+                              poll_interval, timeout, on_progress=on_progress, task_label=task_label,
+                              action=action, err_label=err_label, version=version, service=service,
+                              call_api_fn=_call_api)
 
 
-def _sign_request(secret_id: str, secret_key: str, region: str, endpoint: str, action: str, payload: dict,
-                  version=API_VERSION, service=SERVICE):
-    """构造腾讯云 TC3-HMAC-SHA256 签名，返回 (headers, body_bytes)。
-
-    version / service 供 MPS 等其它产品使用（默认 VOD 的 2018-07-17 / vod）。
-    """
-    ts = int(time.time())
-    date = time.strftime("%Y-%m-%d", time.gmtime(ts))
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-
-    headers = {
-        "Host": endpoint,
-        "Content-Type": "application/json; charset=utf-8",
-        "X-TC-Action": action,
-        "X-TC-Version": version,
-        "X-TC-Timestamp": str(ts),
-    }
-    if region:
-        headers["X-TC-Region"] = region
-
-    signed_headers = ";".join(k.lower() for k in sorted(headers.keys()))
-    canonical_headers = _canonical_headers(headers, action)
-
-    canonical_request = "\n".join([
-        "POST", "/", "",
-        canonical_headers,
-        signed_headers,
-        hashlib.sha256(body).hexdigest(),
-    ])
-    credential_scope = f"{date}/{service}/tc3_request"
-    string_to_sign = "\n".join([
-        "TC3-HMAC-SHA256",
-        str(ts),
-        credential_scope,
-        hashlib.sha256(canonical_request.encode("utf-8")).hexdigest(),
-    ])
-
-    secret_date = _hmac_sha256(("TC3" + secret_key).encode("utf-8"), date)
-    secret_service = _hmac_sha256(secret_date, service)
-    secret_signing = _hmac_sha256(secret_service, "tc3_request")
-    signature = hmac.new(secret_signing, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
-
-    headers["Authorization"] = (
-        f"TC3-HMAC-SHA256 Credential={secret_id}/{credential_scope}, "
-        f"SignedHeaders={signed_headers}, Signature={signature}"
-    )
-    return headers, body
-
-
-def _call_api(secret_id: str, secret_key: str, region: str, endpoint: str, action: str, payload: dict,
-              version=API_VERSION, service=SERVICE) -> dict:
-    """调用腾讯云接口，返回 Response 对象；业务错误抛 RuntimeError。"""
-    endpoint = (endpoint or DEFAULT_ENDPOINT).strip()
-    endpoint = endpoint.replace("https://", "").replace("http://", "").rstrip("/")
-    headers, body = _sign_request(secret_id, secret_key, region, endpoint, action, payload,
-                                  version=version, service=service)
-    req = urllib.request.Request(f"https://{endpoint}/", data=body, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            raw = resp.read().decode("utf-8")
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"HTTP {e.code} — {endpoint} 返回: {e.read().decode('utf-8', 'ignore')[:500]}")
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"无法连接 {endpoint}: {e.reason}（检查网络/代理）")
-
-    data = json.loads(raw)
-    response = data.get("Response", {})
-    if response.get("Error"):
-        err = response["Error"]
-        raise RuntimeError(f"腾讯云接口错误 {err.get('Code')}: {err.get('Message')}")
-    return response
-
-
-_CONFIG_FILE = "tencent-vod-config.json"
-_CRED_FILE_HINT = ("custom_nodes/tencent-vod-aigc/tencent-vod-config.json"
-                   "（模板见同目录 tencent-vod-config.example.json）")
+def _download_video(url: str, task_id: str, on_progress=None, name_hint=None) -> str:
+    """把生成的视频/图片下载到 ComfyUI output/vod_aigc/ 目录（委托 core.download_file）。"""
+    out_dir = os.path.join(folder_paths.get_output_directory(), "vod_aigc")
+    return core.download_file(url, task_id, out_dir, name_hint or "", on_progress=on_progress)
 
 
 def _load_config_file(dir_path=None):
-    """读取统一配置文件 tencent-vod-config.json。
+    """读取统一配置文件 tencent-vod-config.json（委托 core.load_config）。
 
     返回 {"secret_id", "secret_key", "sub_app_id", "prices": {分辨率: 单价}}，
     文件缺失/损坏返回空结构。
     """
     base = dir_path or os.path.dirname(os.path.abspath(__file__))
-    try:
-        with open(os.path.join(base, _CONFIG_FILE), "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except FileNotFoundError:
-        data = {}
-    except Exception as e:
-        print(f"[tencent-vod-aigc] {_CONFIG_FILE} 读取失败（忽略）: {e}")
-        data = {}
-    result = {k: str(data.get(k) or "").strip() for k in ("secret_id", "secret_key", "sub_app_id")}
-    result["prices"] = {}
-    prices = data.get("prices")
-    if isinstance(prices, dict):
-        for k, v in prices.items():
-            try:
-                result["prices"][k] = float(v)
-            except (TypeError, ValueError):
-                pass
-    result["image_prices"] = {}
-    img_prices = data.get("image_prices")
-    if isinstance(img_prices, dict):
-        for k, v in img_prices.items():
-            try:
-                result["image_prices"][k] = float(v)
-            except (TypeError, ValueError):
-                pass
-    return result
+    return core.load_config(os.path.join(base, _CONFIG_FILE))
 
 
 def _resolve_credentials(secret_id, secret_key, sub_app_id):
-    """凭据解析优先级：节点输入 > tencent-vod-config.json。"""
+    """凭据解析优先级：节点输入 > tencent-vod-config.json（校验委托 core.resolve_credentials）。"""
     file_creds = _load_config_file()
-    sid = (secret_id or "").strip() or file_creds.get("secret_id")
-    skey = (secret_key or "").strip() or file_creds.get("secret_key")
-    sub = (sub_app_id or "").strip() or file_creds.get("sub_app_id")
-    if not sid or not skey:
-        raise ValueError("缺少腾讯云密钥：请在节点填写 SecretId / SecretKey，或配置 "
-                         + _CRED_FILE_HINT)
-    if not sub:
-        raise ValueError("缺少 SubAppId：请在节点填写，或配置 "
-                         + _CRED_FILE_HINT)
-    if not sub.isdigit():
-        raise ValueError(f"SubAppId 必须为纯数字，当前值: {sub}")
-    return sid, skey, sub
+    return core.resolve_credentials({
+        "secret_id": (secret_id or "").strip() or file_creds.get("secret_id"),
+        "secret_key": (secret_key or "").strip() or file_creds.get("secret_key"),
+        "sub_app_id": (sub_app_id or "").strip() or file_creds.get("sub_app_id"),
+    })
 
 
 def _resolve_secret_pair(secret_id, secret_key):
     """凭据解析（仅密钥对）：供 MPS 等不使用 SubAppId 的服务（如音乐生成）。"""
     file_creds = _load_config_file()
-    sid = (secret_id or "").strip() or file_creds.get("secret_id")
-    skey = (secret_key or "").strip() or file_creds.get("secret_key")
-    if not sid or not skey:
-        raise ValueError("缺少腾讯云密钥：请在节点填写 SecretId / SecretKey，或配置 "
-                         + _CRED_FILE_HINT)
-    return sid, skey
+    return core.resolve_secret_pair({
+        "secret_id": (secret_id or "").strip() or file_creds.get("secret_id"),
+        "secret_key": (secret_key or "").strip() or file_creds.get("secret_key"),
+    })
 
 
 def _credentials_configured() -> bool:
@@ -212,42 +113,101 @@ def _credentials_configured() -> bool:
     return bool(file_creds.get("secret_id") and file_creds.get("secret_key") and file_creds.get("sub_app_id"))
 
 
-def _save_config_file(secret_id, secret_key, sub_app_id, prices=None, image_prices=None, path=None) -> str:
-    """校验并写入统一配置文件（凭据必填；单价选填，仅合并非空数值项），返回文件路径。
+def _price_for(resolution: str) -> float:
+    """单价（元/秒）解析：tencent-vod-config.json prices，未配置返回 0（委托 core.price_for）。"""
+    return core.price_for(resolution, _load_config_file())
 
-    prices = 视频单价（元/秒，按分辨率）；image_prices = 生图单价（元/张，按模型）。
-    """
-    sid, skey, sub = (secret_id or "").strip(), (secret_key or "").strip(), (sub_app_id or "").strip()
-    if not sid or not skey:
-        raise ValueError("SecretId 与 SecretKey 不能为空")
-    if not sub.isdigit():
-        raise ValueError(f"SubAppId 必须为纯数字，当前值: {sub}")
-    path = path or os.path.join(os.path.dirname(os.path.abspath(__file__)), _CONFIG_FILE)
-    existing = _load_config_file(os.path.dirname(path)) if os.path.exists(path) else {}
 
-    merged = dict(existing.get("prices", {}))
-    for res, val in (prices or {}).items():
-        if val is None or val == "":
-            continue
-        try:
-            merged[str(res)] = float(val)
-        except (TypeError, ValueError):
-            raise ValueError(f"视频单价 {res} 必须是数字，当前值: {val}")
+def _image_price_for(model: str) -> float:
+    """生图单价（元/张）：tencent-vod-config.json image_prices，按模型区分，未配置返回 0。"""
+    return core.image_price_for(model, _load_config_file())
 
-    merged_img = dict(existing.get("image_prices", {}))
-    for model, val in (image_prices or {}).items():
-        if val is None or val == "":
-            continue
-        try:
-            merged_img[str(model)] = float(val)
-        except (TypeError, ValueError):
-            raise ValueError(f"生图单价 {model} 必须是数字，当前值: {val}")
 
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump({"secret_id": sid, "secret_key": skey, "sub_app_id": sub,
-                   "prices": merged, "image_prices": merged_img},
-                  f, indent=2, ensure_ascii=False)
-    return path
+def _estimate_cost(resolution: str, duration: int) -> tuple:
+    """按计费规则估算费用：秒数 = max(时长, 5)，费用 = 秒数 × 单价（元）。"""
+    return core.estimate_cost(resolution, duration, _load_config_file())
+
+
+def _base_record(mode: str, prompt: str, kwargs: dict, task_id="", url="", path="", error="", cache_key=""):
+    """构造台账记录：含计费要素（时长/分辨率/模型/张数），便于成本审计（委托 core.base_record）。"""
+    return core.base_record(mode, prompt, kwargs, task_id=task_id, url=url, path=path,
+                            error=error, cache_key=cache_key, cfg=_load_config_file(),
+                            view_url=_view_url_for(path) if path else "")
+
+
+def _find_cached_record(cache_key: str):
+    """台账查重：返回同缓存键最近一次成功且产物文件仍在的记录，否则 None。"""
+    ledger = os.path.join(folder_paths.get_output_directory(), "vod_aigc", "execution_history.jsonl")
+    return core.find_cached_record(cache_key, ledger)
+
+
+def _append_history(record: dict):
+    """把一条执行记录追加到 output/vod_aigc/execution_history.jsonl（成功/失败都记）。"""
+    ledger = os.path.join(folder_paths.get_output_directory(), "vod_aigc", "execution_history.jsonl")
+    core.append_history(record, ledger)
+
+
+def _resolve_media_path(path: str) -> str:
+    """素材路径解析：~ 展开 + 绝对路径原样；input/、output/ 前缀解析到 ComfyUI 对应目录；其余按进程工作目录。"""
+    return core.resolve_media_path(path, input_dir=folder_paths.get_input_directory(),
+                                   out_dir=folder_paths.get_output_directory())
+
+
+def _file_to_base64(path: str, max_bytes: int, what: str, allowed_exts=None) -> str:
+    """本地素材 → Base64（≤max_bytes）；文件缺失 / 扩展名不允许 / 超限抛 ValueError。"""
+    return core.file_to_base64(path, max_bytes, what, allowed_exts,
+                               input_dir=folder_paths.get_input_directory(),
+                               out_dir=folder_paths.get_output_directory())
+
+
+def _resolve_save_name(url: str, task_id: str, name_hint: str = "", out_dir=None) -> str:
+    """本地保存文件名：name_hint 优先（自动补扩展名、重名加序号），否则 task_id 尾号 + URL 文件名。"""
+    out_dir = out_dir or os.path.join(folder_paths.get_output_directory(), "vod_aigc")
+    return core.resolve_save_name(url, task_id, name_hint, out_dir)
+
+
+def _view_url_for(path: str) -> str:
+    """把输出目录下的文件转成 ComfyUI /view 链接（浏览器可直接播放）。"""
+    try:
+        rel = os.path.relpath(path, folder_paths.get_output_directory())
+        sub, name = os.path.split(rel)
+        return f"/view?filename={urllib.parse.quote(name)}&subfolder={urllib.parse.quote(sub)}&type=output"
+    except Exception:
+        return ""
+
+
+def _set_status(node, text: str):
+    """向前端显示节点运行状态（旧版本忽略）。"""
+    try:
+        node.display_string = text
+    except Exception:
+        pass
+
+
+def _image_tensor_to_base64(image_tensor, frame_index: int = 0) -> str:
+    """ComfyUI IMAGE tensor（B,H,W,C float 0-1）→ PNG Base64。"""
+    img = image_tensor[frame_index].cpu().numpy()
+    img = np.clip(img * 255.0, 0, 255).astype(np.uint8)
+    buf = io.BytesIO()
+    Image.fromarray(img).save(buf, format="PNG")
+    data = buf.getvalue()
+    if len(data) > _MAX_IMAGE_BYTES:
+        raise ValueError(f"图片超过 30MB 上限，请压缩后再试（{len(data) // (1024*1024)}MB）")
+    return base64.b64encode(data).decode("ascii")
+
+
+def _paths_to_image_tensor(paths):
+    """把本地图片列表转成 ComfyUI IMAGE 张量（B,H,W,C float 0-1）；失败返回 None 不阻塞主流程。"""
+    try:
+        import torch
+        frames = []
+        for p in paths:
+            with Image.open(p) as im:
+                arr = np.asarray(im.convert("RGB"), dtype=np.float32) / 255.0
+            frames.append(torch.from_numpy(arr))
+        return torch.stack(frames) if frames else None
+    except Exception:
+        return None
 
 
 def _register_http_routes():
@@ -282,387 +242,7 @@ def _register_http_routes():
     routes.post("/tencent-vod-aigc/config")(config_save)
 
 
-# ---------------------------------------------------------------- 工具函数
-
-def _set_status(node, text: str):
-    """向前端显示节点运行状态（旧版本忽略）。"""
-    try:
-        node.display_string = text
-    except Exception:
-        pass
-
-
-def _image_tensor_to_base64(image_tensor, frame_index: int = 0) -> str:
-    """ComfyUI IMAGE tensor（B,H,W,C float 0-1）→ PNG Base64。"""
-    img = image_tensor[frame_index].cpu().numpy()
-    img = np.clip(img * 255.0, 0, 255).astype(np.uint8)
-    buf = io.BytesIO()
-    Image.fromarray(img).save(buf, format="PNG")
-    data = buf.getvalue()
-    if len(data) > _MAX_IMAGE_BYTES:
-        raise ValueError(f"图片超过 30MB 上限，请压缩后再试（{len(data) // (1024*1024)}MB）")
-    return base64.b64encode(data).decode("ascii")
-
-
-def _resolve_media_path(path: str) -> str:
-    """素材路径解析：~ 展开 + 绝对路径原样；input/、output/ 前缀解析到 ComfyUI 对应目录；其余按进程工作目录。"""
-    p = (path or "").strip()
-    if not p:
-        return p
-    p = os.path.expanduser(p)  # 支持 ~/Downloads/xxx 这类 shell 习惯写法
-    if os.path.isabs(p):
-        return p
-    for prefix, getter in (("input/", folder_paths.get_input_directory),
-                           ("output/", folder_paths.get_output_directory)):
-        if p.startswith(prefix):
-            return os.path.join(getter(), p[len(prefix):])
-    return p  # 兼容旧行为：相对进程 cwd
-
-
-def _file_to_base64(path: str, max_bytes: int, what: str, allowed_exts=None) -> str:
-    resolved = _resolve_media_path(path)
-    if not os.path.isfile(resolved):
-        raise ValueError(f"文件不存在: {path}（支持 ~/、input/xxx、output/xxx 或绝对路径）")
-    if allowed_exts:
-        ext = os.path.splitext(resolved)[1].lower()
-        if ext and ext not in allowed_exts:
-            raise ValueError(f"{what} 扩展名 \"{ext}\" 不支持，允许: {', '.join(allowed_exts)}（路径: {path[:80]}）")
-    data = open(resolved, "rb").read()
-    if len(data) > max_bytes:
-        raise ValueError(f"{what} 超过 {max_bytes // (1024*1024)}MB 上限: {path}")
-    return base64.b64encode(data).decode("ascii")
-
-
-_ALLOWED_VIDEO_EXTS = (".mp4", ".mov")
-_ALLOWED_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
-_ALLOWED_AUDIO_EXTS = (".mp3", ".wav", ".m4a", ".aac")
-
-
-def _validate_media_url(url: str, allowed: tuple, what: str):
-    """提交前校验素材 URL 扩展名：明确不在允许列表时本地报错（避免任务跑完才失败）。
-
-    无扩展名/无法解析的 URL 不拦截（交由服务端判断）。
-    """
-    path = urllib.parse.urlparse(url.strip()).path
-    ext = os.path.splitext(path)[1].lower()
-    if ext and ext not in allowed:
-        raise ValueError(f"{what} 扩展名 \"{ext}\" 不支持，允许: {', '.join(allowed)}（URL: {url[:80]}）")
-
-
-def _parse_multiline(text):
-    """多行 STRING 输入 → 去空行列表。"""
-    if not text:
-        return []
-    return [line.strip() for line in text.splitlines() if line.strip()]
-
-
-class TaskError(RuntimeError):
-    """任务级错误：携带 task_id，供台账记录与后续排查。"""
-
-    def __init__(self, task_id, message):
-        super().__init__(message)
-        self.task_id = task_id
-
-
-def _extract_task_result(detail: dict):
-    """从任务查询响应中提取 AIGC 任务状态、错误信息与输出文件 URL。
-
-    兼容两种结构：
-    - VOD DescribeTaskDetail：详情嵌在 AigcVideoTask / AigcImageTask 子对象（正则 Aigc|SceneAigc\\w*Task），
-      输出在 Output.FileInfos[].FileUrl（Input 子树必须忽略）；
-    - MPS DescribeAigcAudioTask：状态与 AudioInfos[].Url 平铺在顶层（无 Task 子对象）。
-    """
-    task_dict = None
-    for key, value in detail.items():
-        if isinstance(value, dict) and re.search(r"(Aigc|SceneAigc)\w*Task$", key):
-            task_dict = value
-            break
-    if task_dict is None:
-        task_dict = detail
-
-    status = task_dict.get("Status") or detail.get("Status")
-    err_code = task_dict.get("ErrCode")
-    err_code_ext = task_dict.get("ErrCodeExt")
-    message = task_dict.get("Message")
-
-    urls = []
-
-    def _walk(node):
-        if isinstance(node, dict):
-            if isinstance(node.get("FileUrl"), str):
-                urls.append(node["FileUrl"])
-            if isinstance(node.get("Url"), str):
-                urls.append(node["Url"])
-            for v in node.values():
-                _walk(v)
-        elif isinstance(node, list):
-            for item in node:
-                _walk(item)
-
-    output = task_dict.get("Output")
-    if output:
-        _walk(output)      # VOD 结构：只走 Output 子树，忽略 Input
-    else:
-        _walk(task_dict)   # MPS 平铺结构：AudioInfos[].Url 在顶层
-    return (status or "").upper(), err_code, err_code_ext, message, urls
-
-
-def _wait_for_task(secret_id, secret_key, region, endpoint, sub_app_id, task_id,
-                   poll_interval, timeout, on_progress=None, task_label="H3 生成中",
-                   action="DescribeTaskDetail", err_label="H3",
-                   version=API_VERSION, service=SERVICE) -> dict:
-    """轮询任务直到完成，返回 {"status", "urls", "detail"}。
-
-    action 默认 VOD DescribeTaskDetail；MPS 音乐任务传 DescribeAigcAudioTask
-    （查询仅 TaskId 一个参数，状态 DONE=成功 / FAIL=失败，错误文案前缀用 err_label）。
-    """
-    deadline = time.time() + timeout
-    started = time.time()
-    while True:
-        if action == "DescribeAigcAudioTask":
-            query = {"TaskId": task_id}  # MPS 查询接口无 SubAppId 参数
-        else:
-            query = {"SubAppId": int(sub_app_id), "TaskId": task_id}
-        response = _call_api(secret_id, secret_key, region, endpoint, action, query,
-                             version=version, service=service)
-        # 真实响应把任务详情平铺在 Response 顶层（部分文档描述为嵌套在 TaskDetail，两者都兼容）
-        detail = response.get("TaskDetail") or response
-        status, err_code, err_code_ext, message, urls = _extract_task_result(detail)
-        if status in ("SUCCESS", "FINISH", "DONE"):
-            if not urls:
-                if err_code or err_code_ext or message:
-                    hint = "（提示词或素材触发内容安全审核，请修改后重试）" if err_code_ext and "Violation" in err_code_ext else ""
-                    raise TaskError(task_id, f"{err_label} 任务被拒绝（ErrCode={err_code} ErrCodeExt={err_code_ext or '-'} Message={message or '-'}）TaskId: {task_id} {hint}".rstrip())
-                raise TaskError(task_id, f"任务成功但未找到输出文件 URL（原始响应: {json.dumps(detail, ensure_ascii=False)[:400]}）")
-            return {"status": status, "urls": urls, "detail": detail}
-        if status in ("FAIL", "FAILED", "ERROR"):
-            raise TaskError(task_id, f"{err_label} 任务失败 (ErrCode={err_code}): {message or '未知错误'}（TaskId: {task_id}）")
-        if time.time() > deadline:
-            raise TaskError(task_id, f"任务超时（{timeout}s 未完成）。TaskId: {task_id}，可用「VOD AIGC - 查询任务」节点手动查询")
-        elapsed = int(time.time() - started)
-        if on_progress:
-            on_progress(f"{task_label}… {elapsed}s | TaskId: {task_id[-16:]}")
-        time.sleep(max(1, int(poll_interval)))
-
-
-def _resolve_save_name(url: str, task_id: str, name_hint: str = "", out_dir=None) -> str:
-    """本地保存文件名：name_hint 优先（自动补扩展名、重名加序号），否则 task_id 尾号 + URL 文件名。"""
-    original = urllib.parse.unquote(urllib.parse.urlparse(url).path.split("/")[-1]) or "aigcGenFile.mp4"
-    ext = os.path.splitext(original)[1]
-    if name_hint:
-        # 命名组合：<filename>_<taskId尾8位> —— 文件与台账/任务可追溯，且 taskId 尾号天然唯一
-        base = f"{name_hint}_{task_id[-8:]}"
-        if ext and not base.lower().endswith(ext.lower()):
-            base += ext
-    else:
-        base = f"{task_id[-8:]}_{original}"
-    out_dir = out_dir or os.path.join(folder_paths.get_output_directory(), "vod_aigc")
-    name = base
-    counter = 1
-    while os.path.exists(os.path.join(out_dir, name)):  # 重名去重（多图同 hint 场景）
-        stem, e = os.path.splitext(base)
-        name = f"{stem}_{counter}{e}"
-        counter += 1
-    return name
-
-
-def _paths_to_image_tensor(paths):
-    """把本地图片列表转成 ComfyUI IMAGE 张量（B,H,W,C float 0-1）；失败返回 None 不阻塞主流程。"""
-    try:
-        import torch
-        frames = []
-        for p in paths:
-            with Image.open(p) as im:
-                arr = np.asarray(im.convert("RGB"), dtype=np.float32) / 255.0
-            frames.append(torch.from_numpy(arr))
-        return torch.stack(frames) if frames else None
-    except Exception:
-        return None
-
-
-def _download_video(url: str, task_id: str, on_progress=None, name_hint=None) -> str:
-    """把生成的视频下载到 ComfyUI output/vod_aigc/ 目录。
-
-    流式下载 + 60s 超时 + 进度回调；失败时抛出包含可手动下载 URL 的错误，
-    避免阻塞线程导致整个 ComfyUI 无法中断。
-    """
-
-    out_dir = os.path.join(folder_paths.get_output_directory(), "vod_aigc")
-    os.makedirs(out_dir, exist_ok=True)
-    name = _resolve_save_name(url, task_id, name_hint or "", out_dir)
-    path = os.path.join(out_dir, name)
-
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp, open(path, "wb") as f:
-            total = int(resp.headers.get("Content-Length") or 0)
-            downloaded = 0
-            while True:
-                chunk = resp.read(256 * 1024)
-                if not chunk:
-                    break
-                f.write(chunk)
-                downloaded += len(chunk)
-                if on_progress:
-                    pct = f"{downloaded / total * 100:.0f}%" if total else f"{downloaded // (1024 * 1024)}MB"
-                    on_progress(f"下载中… {pct}")
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"文件下载失败 HTTP {e.code}。可手动下载: {url}")
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
-        raise RuntimeError(f"文件下载失败（{e}）。可手动下载: {url}")
-    return path
-
-
 # ---------------------------------------------------------------- 执行台账
-
-def _append_history(record: dict):
-    """把一条执行记录追加到 output/vod_aigc/execution_history.jsonl（成功/失败都记）。"""
-    try:
-        out_dir = os.path.join(folder_paths.get_output_directory(), "vod_aigc")
-        os.makedirs(out_dir, exist_ok=True)
-        path = os.path.join(out_dir, "execution_history.jsonl")
-        record.setdefault("time", time.strftime("%Y-%m-%dT%H:%M:%S%z"))
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except Exception as e:  # 台账写入失败不影响生成主流程
-        print(f"[tencent-vod-aigc] 执行台账写入失败: {e}")
-
-
-_MIN_BILLED_SECONDS = 5  # 每次任务不足 5 秒按 5 秒计费
-
-
-def _price_for(resolution: str) -> float:
-    """单价（元/秒）解析：tencent-vod-config.json prices，未配置返回 0。"""
-    try:
-        return float(_load_config_file().get("prices", {}).get(resolution, 0.0))
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _estimate_cost(resolution: str, duration: int) -> tuple:
-    """按计费规则估算费用：秒数 = max(时长, 5)，费用 = 秒数 × 单价（元）。"""
-    seconds_billed = max(int(duration or 0), _MIN_BILLED_SECONDS)
-    return seconds_billed, round(seconds_billed * _price_for(resolution), 4)
-
-
-def _image_price_for(model: str) -> float:
-    """生图单价（元/张）：tencent-vod-config.json image_prices，按模型区分，未配置返回 0。
-
-    不同模型对应不同计费项（如即梦→SI、OG→GPT-Image2 计费），键为模型下拉全名。
-    """
-    try:
-        return float(_load_config_file().get("image_prices", {}).get(model or "", 0.0))
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _view_url_for(path: str) -> str:
-    """把输出目录下的文件转成 ComfyUI /view 链接（浏览器可直接播放）。"""
-    try:
-        rel = os.path.relpath(path, folder_paths.get_output_directory())
-        sub, name = os.path.split(rel)
-        return f"/view?filename={urllib.parse.quote(name)}&subfolder={urllib.parse.quote(sub)}&type=output"
-    except Exception:
-        return ""
-
-
-def _base_record(mode: str, prompt: str, kwargs: dict, task_id="", url="", path="", error="", cache_key=""):
-    """构造台账记录：含计费要素（时长/分辨率/模型/张数），便于成本审计。
-
-    视频按秒计费（元/秒 × 计费秒数）；生图按张计费（元/张 × 张数，按模型）；
-    音乐生成（t2a）不计秒不计费，费用恒为 0。
-    """
-    if mode in ("t2i", "i2i"):
-        model = kwargs.get("model") or ""
-        image_count = int(kwargs.get("output_image_count") or 1)
-        seconds_billed, estimated_cost = 0, round(image_count * _image_price_for(model), 4)
-    elif mode == "t2a":
-        model, image_count = kwargs.get("model") or "", 0
-        seconds_billed, estimated_cost = 0, 0.0  # 音乐生成不计秒不计费
-    else:
-        model, image_count = "", 0
-        seconds_billed, estimated_cost = _estimate_cost(kwargs.get("resolution") or "",
-                                                        kwargs.get("duration") or 0)
-    return {
-        "mode": mode,
-        "task_id": task_id,
-        "status": "failure" if error else "success",
-        "prompt": (prompt or "")[:200],
-        "duration": int(kwargs.get("duration") or 0),
-        "resolution": kwargs.get("resolution") or "",
-        "aspect_ratio": kwargs.get("aspect_ratio") or "",
-        "audio_generation": kwargs.get("audio_generation") or "",
-        "storage_mode": kwargs.get("storage_mode") or "",
-        "enhance_prompt": kwargs.get("enhance_prompt") or "",
-        "model": model,
-        "image_count": image_count,
-        "video_url": url,
-        "video_path": path,
-        "view_url": _view_url_for(path) if path else "",
-        "seconds_billed": seconds_billed,
-        "estimated_cost": estimated_cost,
-        "cache_key": cache_key,
-        "cached": False,
-        "error": (error or "")[:500],
-    }
-
-
-def _cache_key(mode: str, prompt: str, kwargs: dict) -> str:
-    """结果缓存键：mode + prompt + 全部影响输出的参数 + 参考素材指纹。
-
-    同键且产物仍在 = 命中，直接复用本地文件（不调腾讯云 API）。
-    """
-    key = {"mode": mode, "prompt": prompt or ""}
-    for k in ("duration", "resolution", "aspect_ratio", "audio_generation", "storage_mode",
-              "enhance_prompt", "media_name", "model", "output_image_count", "output_format",
-              "lyrics", "is_instrumental"):
-        if k in kwargs:
-            key[k] = kwargs[k]
-    refs = []
-    for k in ("ref_image_urls", "ref_image_paths", "ref_video_paths", "ref_video_urls",
-              "ref_audio_paths", "ref_audio_urls",
-              "first_frame_url", "first_frame_path", "last_frame_url", "last_frame_path",
-              "filename"):
-        v = kwargs.get(k)
-        if v:
-            refs.append(f"{k}={v}")
-    img = kwargs.get("ref_images")
-    if img is not None:
-        try:
-            refs.append(f"ref_images={hashlib.sha256(img.cpu().numpy().tobytes()).hexdigest()[:16]}")
-        except Exception:
-            refs.append(f"ref_images=<unhashable>")
-    key["refs"] = "|".join(refs)
-    return hashlib.sha256(json.dumps(key, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
-
-
-def _find_cached_record(cache_key: str):
-    """台账查重：返回同缓存键最近一次成功且产物文件仍在的记录，否则 None。"""
-    try:
-        out_dir = os.path.join(folder_paths.get_output_directory(), "vod_aigc")
-        ledger_path = os.path.join(out_dir, "execution_history.jsonl")
-        if not os.path.isfile(ledger_path):
-            return None
-        hit = None
-        with open(ledger_path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    rec = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if rec.get("cache_key") != cache_key or rec.get("status") != "success":
-                    continue
-                paths = [p for p in (rec.get("video_path") or "").splitlines() if p]
-                if not paths or not all(os.path.isfile(p) for p in paths):
-                    continue  # 产物已丢失 → 不命中，允许重新生成
-                hit = rec  # 台账按时间追加，后写的覆盖
-        return hit
-    except Exception:
-        return None
-
 
 def _ledger(mode):
     """生成节点装饰器：成功/失败都写执行台账；失败原样抛出。
@@ -739,81 +319,6 @@ def _output_config_inputs():
         "poll_interval": ("INT", {"default": 10, "min": 3, "max": 120, "step": 1, "tooltip": "任务轮询间隔（秒）"}),
         "timeout": ("INT", {"default": 1800, "min": 60, "max": 7200, "step": 60, "tooltip": "任务超时时间（秒），视频生成通常需数分钟"}),
     }
-
-
-def _build_payload(sub_app_id, prompt, enhance_prompt, oc_values, file_infos=None, input_region=""):
-    """构造 CreateAigcVideoTask 请求体（Hailuo / H3）。"""
-    payload = {
-        "SubAppId": int(sub_app_id),
-        "ModelName": "Hailuo",
-        "ModelVersion": "H3",
-        "Prompt": prompt,
-        "EnhancePrompt": enhance_prompt,
-        "OutputConfig": {
-            "StorageMode": oc_values["storage_mode"],
-            "Duration": int(oc_values["duration"]),
-            "Resolution": oc_values["resolution"],
-            "AspectRatio": oc_values["aspect_ratio"],
-            "AudioGeneration": oc_values["audio_generation"],
-        },
-    }
-    if oc_values.get("media_name"):
-        payload["OutputConfig"]["MediaName"] = oc_values["media_name"]
-    if file_infos:
-        payload["FileInfos"] = file_infos
-    if input_region:
-        payload["InputRegion"] = input_region
-    return payload
-
-
-def _build_music_payload(prompt, model, oc_values, file_infos=None):
-    """构造 MPS CreateAigcAudioTask 请求体（GL / MiniMaxMusic 音乐生成）。
-
-    注意：MPS 无 SubAppId 参数；AdditionalParameters 为 JSON 字符串
-    （歌词 {"lyric":"..."} 或纯音乐 {"is_instrumental":true}，由调用方拼好传入）。
-    """
-    name, _, version = (model or "MiniMaxMusic 2.6").partition(" ")
-    payload = {
-        "ModelName": name,
-        "ModelVersion": version,
-        "SceneType": "music",
-        "Prompt": prompt,
-    }
-    ap = (oc_values.get("additional_parameters") or "").strip()
-    if ap:
-        payload["AdditionalParameters"] = ap
-    fmt = (oc_values.get("output_format") or "").strip()
-    if fmt:
-        payload["OutputAudioFormat"] = fmt
-    if file_infos:
-        payload["AudioInfos"] = file_infos
-    return payload
-
-
-def _build_image_payload(sub_app_id, prompt, model, oc_values, file_infos=None):
-    """构造 CreateAigcImageTask 请求体（3.3.2 GEM/Jimeng、3.14 GPT-Image2）。"""
-    name, _, version = (model or "Jimeng 4.0").partition(" ")
-    cfg = {
-        "StorageMode": oc_values["storage_mode"],
-        "Resolution": oc_values["resolution"],
-        "AspectRatio": oc_values["aspect_ratio"],
-    }
-    count = int(oc_values.get("output_image_count") or 1)
-    if count > 1:
-        cfg["OutputImageCount"] = count  # OG 支持 1-8
-    fmt = (oc_values.get("output_format") or "").strip()
-    if fmt:
-        cfg["OutputFormat"] = fmt        # OG 支持 png/jpeg
-    payload = {
-        "SubAppId": int(sub_app_id),
-        "ModelName": name,
-        "ModelVersion": version,
-        "Prompt": prompt,
-        "OutputConfig": cfg,
-    }
-    if file_infos:
-        payload["FileInfos"] = file_infos
-    return payload
 
 
 # ---------------------------------------------------------------- 节点类
@@ -1019,21 +524,8 @@ class TencentVODH3ReferenceToVideo:
         if not file_infos:
             raise ValueError("参考生视频至少需要一个素材（图/视频/音频）")
 
-        n_images = sum(1 for f in file_infos if f["Category"] == "Image")
-        n_videos = sum(1 for f in file_infos if f["Category"] == "Video")
-        n_audios = sum(1 for f in file_infos if f["Category"] == "Audio")
-        if n_images > 9:
-            raise ValueError(f"参考图最多 9 张，当前 {n_images} 张")
-        if n_videos > 3:
-            raise ValueError(f"参考视频最多 3 段，当前 {n_videos} 段")
-        if n_audios > 3:
-            raise ValueError(f"参考音频最多 3 段，当前 {n_audios} 段")
-        if n_images + n_videos + n_audios > 12:
-            raise ValueError(f"混合素材总数上限 12 个，当前 {n_images + n_videos + n_audios} 个")
-        if n_audios > 0 and n_images == 0 and n_videos == 0:
-            raise ValueError("音频不能单独作为参考输入，必须配图片或视频")
-        if base64_total > _MAX_BASE64_TOTAL:
-            raise ValueError("Base64 素材总大小超过 70MB 上限")
+        # 素材配额：图≤9 / 视频≤3 / 音频≤3 / 总数≤12 / 音频不能单独 / Base64≤70MB
+        _check_media_quota(file_infos, base64_total)
 
         secret_id, secret_key, sub_app_id = _resolve_credentials(
             kwargs.get("secret_id"), kwargs.get("secret_key"), kwargs.get("sub_app_id"))
@@ -1166,8 +658,7 @@ class TencentVODAIGCMusicTask:
     注意：MPS 接口无 SubAppId，凭据仅需 SecretId/SecretKey（节点输入或配置文件）。
     """
 
-    _MUSIC_MODELS = ["GL 2.0", "GL 3.0-clip", "GL 3.0-pro",
-                     "MiniMaxMusic 2.0", "MiniMaxMusic 2.5", "MiniMaxMusic 2.6"]
+    _MUSIC_MODELS = MUSIC_MODELS
 
     @classmethod
     def INPUT_TYPES(cls):

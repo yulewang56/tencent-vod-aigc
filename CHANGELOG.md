@@ -1,5 +1,19 @@
 # Changelog
 
+## [v1.15.0] - 2026-08-19
+
+### Added
+- **SDK 化**：抽出纯标准库 `vod_aigc_core.py`（无头可跑，零 ComfyUI/numpy/PIL 依赖），
+  `nodes.py` 变薄壳仅保留节点定义；脚本侧可直接 `import vod_aigc_core` 走完整链路
+  （TC3 签名 → 提交任务 → 轮询 → 下载 → 结果缓存 → 台账）
+- core 公开 API：`call_api` / `build_video_payload` / `build_image_payload` / `build_music_payload` /
+  `wait_for_task` / `download_file` / `cache_key` / `base_record` / `append_history` /
+  `run_image_task` / `run_video_task` 等
+
+### 变更
+- 重构（行为零变化）：节点逻辑全部委托 core，UI 参数 / 默认值 / 显示名 / 台账格式均不变；
+  `scripts/e2e_music.py` 改为直接 import core（移除 comfy stub）
+
 ## [v1.14.1] - 2026-08-17
 
 ### 修复
