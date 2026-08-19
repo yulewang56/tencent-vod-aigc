@@ -352,6 +352,28 @@ def annotate_content_refs(message, names):
 
 
 
+_NAME_REF_RE = re.compile(r"@(?!图片\d+)([\u4e00-\u9fa5A-Za-z_][\u4e00-\u9fa5A-Za-z0-9_]*)")  # 排除兼容语法 @图片N
+
+
+def validate_prompt_refs(prompt: str) -> None:
+    """校验 prompt 中没有不被本节点支持的素材引用语法。
+
+    腾讯 VOD 接入层的 `FileInfos.Text` + `@名称` 绑定**仅 PixVerse 模型**生效
+    （接入指南原文），H3 / VS 模型不支持——`@皇后` 这类名称引用会被模型当作
+    普通文本忽略，造成静默错绑。本节点只支持 `@N`（1 基序号，提交时转换为
+    API 的顺序引用「图N」）。检测到残留的 `@名称` 直接报错，避免误导。
+    """
+    if not prompt:
+        return
+    for m in _NAME_REF_RE.finditer(prompt):
+        name = m.group(1)
+        raise ValueError(
+            f"prompt 中的 @{name} 不是有效的素材引用：本节点（H3/VS）仅支持 @N 序号引用"
+            f"（@1=第 1 张参考图，BatchImagesNode 的 image0 即 @1）。"
+            f"「@名称」绑定是腾讯接入层 PixVerse 模型的能力，H3/VS 不适用"
+            f"（如需给素材起名请直接描述，如「图1：皇后」）")
+
+
 def expand_prompt_refs(prompt: str, ref_image_count: int) -> str:
     """把 prompt 中的 `@N` / `@图片N` 引用替换为 API 多图格式「图N」（1 基）。
 
