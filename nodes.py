@@ -173,8 +173,25 @@ def _resolve_media_path(path: str) -> str:
                                    out_dir=folder_paths.get_output_directory())
 
 
-def _file_to_base64(path: str, max_bytes: int, what: str, allowed_exts=None) -> str:
-    """本地素材 → Base64（≤max_bytes）；文件缺失 / 扩展名不允许 / 超限抛 ValueError。"""
+def _file_to_base64(path: str, max_bytes: int, what: str, allowed_exts=None, image=False) -> str:
+    """本地素材 → Base64（≤max_bytes）；文件缺失 / 扩展名不允许 / 超限抛 ValueError。
+
+    image=True 时走 PIL 压缩路径（参考图不保真压缩到 ≤1.2MB，控请求体在网关 10MB 内）；
+    视频/音频等素材保持原样（Base64 直读，走 core）。
+    """
+    if image:
+        resolved = _resolve_media_path(path)
+        if not os.path.isfile(resolved):
+            raise ValueError(f"文件不存在: {path}（支持 ~/、input/xxx、output/xxx 或绝对路径）")
+        if allowed_exts:
+            ext = os.path.splitext(resolved)[1].lower()
+            if ext and ext not in allowed_exts:
+                raise ValueError(f"{what} 扩展名 \"{ext}\" 不支持，允许: {', '.join(allowed_exts)}（路径: {path[:80]}）")
+        with Image.open(resolved) as im:
+            data = _compress_image(im)
+        if len(data) > max_bytes:
+            raise ValueError(f"{what} 超过 {max_bytes // (1024*1024)}MB 上限: {path}")
+        return base64.b64encode(data).decode("ascii")
     return core.file_to_base64(path, max_bytes, what, allowed_exts,
                                input_dir=folder_paths.get_input_directory(),
                                out_dir=folder_paths.get_output_directory())
@@ -204,13 +221,41 @@ def _set_status(node, text: str):
         pass
 
 
+_REF_IMAGE_TARGET = int(1.2 * 1024 * 1024)  # 参考图单张压缩目标（网关请求体 10MB，5 图场景留余量）
+
+
+def _compress_image(img) -> bytes:
+    """参考图压缩：RGB 白底合成 → 缩放（最长边 ≤2048）→ JPEG 迭代降质到 ≤1.2MB。
+
+    模型内部会缩放参考图，压缩画质损失可接受；参数序列固定（确定性，缓存键不受影响）。
+    """
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    max_side, quality = 2048, 88
+    data = b""
+    for _ in range(8):
+        im = img
+        w, h = im.size
+        if max(w, h) > max_side:
+            scale = max_side / max(w, h)
+            im = im.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
+        buf = io.BytesIO()
+        im.save(buf, format="JPEG", quality=quality)
+        data = buf.getvalue()
+        if len(data) <= _REF_IMAGE_TARGET:
+            return data
+        quality -= 10
+        if quality < 60:
+            max_side = int(max_side * 0.75)
+            quality = 88
+    return data
+
+
 def _image_tensor_to_base64(image_tensor, frame_index: int = 0) -> str:
-    """ComfyUI IMAGE tensor（B,H,W,C float 0-1）→ PNG Base64。"""
+    """ComfyUI IMAGE tensor（B,H,W,C float 0-1）→ 压缩 JPEG Base64（参考图不保真压缩，控请求体）。"""
     img = image_tensor[frame_index].cpu().numpy()
     img = np.clip(img * 255.0, 0, 255).astype(np.uint8)
-    buf = io.BytesIO()
-    Image.fromarray(img).save(buf, format="PNG")
-    data = buf.getvalue()
+    data = _compress_image(Image.fromarray(img))
     if len(data) > _MAX_IMAGE_BYTES:
         raise ValueError(f"图片超过 30MB 上限，请压缩后再试（{len(data) // (1024*1024)}MB）")
     return base64.b64encode(data).decode("ascii")
@@ -474,7 +519,7 @@ class TencentVODH3ImageToVideo:
                 _validate_media_url(url, _ALLOWED_IMAGE_EXTS, f"{usage}图")
                 file_infos.append({"Type": "Url", "Category": "Image", "Url": url, "Usage": usage})
             elif path:
-                data = _file_to_base64(path, _MAX_IMAGE_BYTES, f"{usage}图", _ALLOWED_IMAGE_EXTS)
+                data = _file_to_base64(path, _MAX_IMAGE_BYTES, f"{usage}图", _ALLOWED_IMAGE_EXTS, image=True)
                 base64_total += len(data)
                 if base64_total > _MAX_BASE64_TOTAL:
                     raise ValueError("Base64 素材总大小超过 70MB 上限")
@@ -552,7 +597,7 @@ class TencentVODH3ReferenceToVideo:
 
         # 参考图：本地路径
         for path in _parse_multiline(kwargs.get("ref_image_paths")):
-            data = _file_to_base64(path, _MAX_IMAGE_BYTES, "参考图", _ALLOWED_IMAGE_EXTS)
+            data = _file_to_base64(path, _MAX_IMAGE_BYTES, "参考图", _ALLOWED_IMAGE_EXTS, image=True)
             base64_total += len(data)
             file_infos.append({"Type": "Base64", "Category": "Image", "Base64": data, "Usage": "Reference"})
 
@@ -704,7 +749,7 @@ class TencentVODVSVideoTask:
                 _validate_media_url(url, _ALLOWED_IMAGE_EXTS, f"{usage}图")
                 file_infos.append({"Type": "Url", "Category": "Image", "Url": url, "Usage": usage})
             elif path:
-                data = _file_to_base64(path, _MAX_IMAGE_BYTES, f"{usage}图", _ALLOWED_IMAGE_EXTS)
+                data = _file_to_base64(path, _MAX_IMAGE_BYTES, f"{usage}图", _ALLOWED_IMAGE_EXTS, image=True)
                 base64_total += len(data)
                 if base64_total > _MAX_BASE64_TOTAL:
                     raise ValueError("Base64 素材总大小超过 70MB 上限")
@@ -723,7 +768,7 @@ class TencentVODVSVideoTask:
                     raise ValueError("Base64 素材总大小超过 70MB 上限")
                 file_infos.append({"Type": "Base64", "Category": "Image", "Base64": data, "Usage": "Reference"})
         for path in _parse_multiline(kwargs.get("ref_image_paths")):
-            data = _file_to_base64(path, _MAX_IMAGE_BYTES, "参考图", _ALLOWED_IMAGE_EXTS)
+            data = _file_to_base64(path, _MAX_IMAGE_BYTES, "参考图", _ALLOWED_IMAGE_EXTS, image=True)
             base64_total += len(data)
             if base64_total > _MAX_BASE64_TOTAL:
                 raise ValueError("Base64 素材总大小超过 70MB 上限")
@@ -949,7 +994,7 @@ class TencentVODAIGCImageTask:
                 # 生图 FileInfos 仅 Type + Base64/Url（与生视频不同，无 Category/Usage）
                 file_infos.append({"Type": "Base64", "Base64": data})
         for path in _parse_multiline(kwargs.get("ref_image_paths")):
-            data = _file_to_base64(path, _MAX_IMAGE_BYTES, "参考图", _ALLOWED_IMAGE_EXTS)
+            data = _file_to_base64(path, _MAX_IMAGE_BYTES, "参考图", _ALLOWED_IMAGE_EXTS, image=True)
             file_infos.append({"Type": "Base64", "Base64": data})
         for url in _parse_multiline(kwargs.get("ref_image_urls")):
             _validate_media_url(url, _ALLOWED_IMAGE_EXTS, "参考图")

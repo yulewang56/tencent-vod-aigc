@@ -53,7 +53,7 @@ MUSIC_MODELS = ["GL 2.0", "GL 3.0-clip", "GL 3.0-pro",
 _MAX_IMAGE_BYTES = 30 * 1024 * 1024      # 单张图片 ≤30MB（文档限制）
 _MAX_VIDEO_BYTES = 50 * 1024 * 1024      # 单个视频 ≤50MB（文档限制）
 _MAX_AUDIO_BYTES = 15 * 1024 * 1024      # 单个音频 ≤15MB（文档限制）
-_MAX_BASE64_TOTAL = 70 * 1024 * 1024     # Base64 传参总大小 ≤70MB（文档限制）
+_MAX_BASE64_TOTAL = 10 * 1024 * 1024     # Base64 传参总大小 ≤10MB（腾讯云网关实测硬限制 RequestSizeLimitExceeded 10485760B；文档 70MB 与实际不符）
 _MIN_BILLED_SECONDS = 5                  # 每次任务不足 5 秒按 5 秒计费
 
 _ALLOWED_VIDEO_EXTS = (".mp4", ".mov")

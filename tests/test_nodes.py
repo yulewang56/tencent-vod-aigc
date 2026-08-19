@@ -5,6 +5,7 @@ import sys
 import types
 
 # ---- stub ComfyUI/numpy/PIL dependencies (not needed at import time) ----
+# numpy/PIL 优先用真实库（图片压缩是节点功能，需真实 Pillow 验证）；无则降级 stub。
 comfy = types.ModuleType("comfy")
 folder_paths = types.ModuleType("comfy.folder_paths")
 folder_paths.get_output_directory = lambda: "/tmp/comfy_output"
@@ -12,10 +13,17 @@ folder_paths.get_input_directory = lambda: "/tmp/comfy_input"
 comfy.folder_paths = folder_paths
 sys.modules["comfy"] = comfy
 sys.modules["comfy.folder_paths"] = folder_paths
-sys.modules["numpy"] = types.ModuleType("numpy")
-pil = types.ModuleType("PIL")
-pil.Image = types.SimpleNamespace()
-sys.modules["PIL"] = pil
+try:
+    import numpy  # noqa: F401  真实 numpy（若有）
+except ImportError:
+    sys.modules["numpy"] = types.ModuleType("numpy")
+try:
+    import PIL  # noqa: F401  真实 Pillow（若有）
+    import PIL.Image  # noqa: F401
+except ImportError:
+    pil = types.ModuleType("PIL")
+    pil.Image = types.SimpleNamespace()
+    sys.modules["PIL"] = pil
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))  # 仓库根目录
 import nodes
@@ -534,15 +542,22 @@ check("cache: image hit flagged", rec.get("cached") is True, rec)
 import base64 as _b64
 _tmp_p = _tf.mkdtemp()
 ref_png = os.path.join(_tmp_p, "ref.png")
-with open(ref_png, "wb") as f:
-    f.write(b"\x89PNG fake bytes")
+# 真实 PNG 夹具（图片路径走 PIL 压缩路径，假字节会被 UnidentifiedImageError 拒绝）
+if "PIL" in sys.modules and hasattr(sys.modules["PIL"], "Image"):
+    _PIL_Image = sys.modules["PIL"].Image
+    _PIL_Image.new("RGB", (64, 64), (200, 30, 30)).save(ref_png, format="PNG")
+else:
+    with open(ref_png, "wb") as f:
+        f.write(b"\x89PNG fake bytes")
 bad_txt = os.path.join(_tmp_p, "ref.txt")
 with open(bad_txt, "wb") as f:
     f.write(b"not an image")
 
-# 23.1 路径加载与扩展名白名单
-b64_png = nodes._file_to_base64(ref_png, nodes._MAX_IMAGE_BYTES, "参考图", nodes._ALLOWED_IMAGE_EXTS)
-check("path: image loads to base64", _b64.b64decode(b64_png) == b"\x89PNG fake bytes")
+# 23.1 路径加载与扩展名白名单（图片素材压缩为 JPEG 后编码）
+b64_png = nodes._file_to_base64(ref_png, nodes._MAX_IMAGE_BYTES, "参考图", nodes._ALLOWED_IMAGE_EXTS, image=True)
+_decoded_png = _b64.b64decode(b64_png)
+check("path: image loads to compressed jpeg base64",
+      _decoded_png[:2] == b"\xff\xd8" and len(_decoded_png) < 20000, str(len(_decoded_png)))
 try:
     nodes._file_to_base64(bad_txt, nodes._MAX_IMAGE_BYTES, "参考图", nodes._ALLOWED_IMAGE_EXTS)
     check("path: bad image ext rejected", False)
@@ -588,7 +603,7 @@ try:
     fis = captured_i2v["payload"]["FileInfos"]
     check("path: i2v FirstFrame FileInfo", len(fis) == 1 and fis[0]["Usage"] == "FirstFrame"
           and fis[0]["Category"] == "Image" and fis[0]["Type"] == "Base64", str(fis))
-    check("path: i2v b64 content matches file", fis[0]["Base64"] == _b64.b64encode(b"\x89PNG fake bytes").decode())
+    check("path: i2v b64 is compressed jpeg", _b64.b64decode(fis[0]["Base64"])[:2] == b"\xff\xd8")
 finally:
     nodes._call_api = orig_call_p
     nodes._download_video = orig_dl_p
