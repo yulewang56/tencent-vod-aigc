@@ -337,6 +337,19 @@ def parse_multiline(text):
 
 
 _REF_RE = re.compile(r"@(?:图片)?(\d+)")
+def annotate_content_refs(message, names):
+    """把腾讯报错里的 content[N] 索引映射为素材名（0 基同序）；无法映射保留原样。"""
+    if not names:
+        return message or ""
+    def _repl(m):
+        idx = int(m.group(1))
+        if 0 <= idx < len(names):
+            return f"content[{idx}]({names[idx]})"
+        return m.group(0)
+    return re.sub(r"content\[(\d+)\]", _repl, message or "")
+
+
+
 
 
 def expand_prompt_refs(prompt: str, ref_image_count: int) -> str:
