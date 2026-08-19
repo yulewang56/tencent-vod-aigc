@@ -43,6 +43,7 @@ from vod_aigc_core import (
     extract_video_and_lastframe as _extract_video_and_lastframe,
     extract_asset_id as _extract_asset_id,
     parse_multiline as _parse_multiline,
+    expand_prompt_refs as _expand_prompt_refs,
     validate_media_url as _validate_media_url,
     check_media_quota as _check_media_quota,
     save_config_file as _save_config_file,
@@ -509,10 +510,10 @@ class TencentVODH3ReferenceToVideo:
 
     @classmethod
     def INPUT_TYPES(cls):
-        required = {"prompt": ("STRING", {"multiline": True, "default": "", "tooltip": "提示词；多图时可用「图1…图2…」描述"})}
+        required = {"prompt": ("STRING", {"multiline": True, "default": "", "tooltip": "提示词；引用参考图用 @N 或「图N」（N 从 1 开始，BatchImagesNode 的 image0=第 1 张=@1），例如 @1=皇后、@2=祺贵人"})}
         optional = dict(_cred_inputs())          # 凭据选填：留空读 tencent-vod-config.json
         optional.update(_output_config_inputs())
-        optional["ref_images"] = ("IMAGE", {"tooltip": "参考图，支持批量（batch）：多张图请先合成 batch（如 Load Images / ImageBatch 节点），每帧一张，最多 9 张；也可用 ref_image_urls 传多个 URL"})
+        optional["ref_images"] = ("IMAGE", {"tooltip": "参考图，支持批量（batch）：多张图请先合成 batch（如 Load Images / ImageBatch 节点），每帧一张，最多 9 张；帧序即编号（image0=第1张=@1）；也可用 ref_image_urls 传多个 URL"})
         optional["ref_image_paths"] = ("STRING", {"multiline": True, "default": "", "tooltip": "本地参考图路径，每行一个（最多 9 张），支持 ~/、input/xxx、output/xxx 或绝对路径"})
         optional["ref_image_urls"] = ("STRING", {"multiline": True, "default": "", "tooltip": "参考图 URL，每行一个，最多 9 个。必须为可匿名下载的图片直链（.jpg/.png 等），不支持网页地址"})
         optional["ref_video_paths"] = ("STRING", {"multiline": True, "default": "", "tooltip": "本地参考视频路径，每行一个（2-15 秒/段，最多 3 段，共 ≤15 秒）"})
@@ -584,6 +585,11 @@ class TencentVODH3ReferenceToVideo:
         # 素材配额：图≤9 / 视频≤3 / 音频≤3 / 总数≤12 / 音频不能单独 / Base64≤70MB
         _check_media_quota(file_infos, base64_total)
 
+        # @N 引用展开：@1 / @图片1 → 图1（1 基，对应参考图第 N 张，越界报错）
+        prompt = _expand_prompt_refs(prompt, sum(
+            1 for f in file_infos
+            if f.get("Category") == "Image" and f.get("Usage") == "Reference"))
+
         secret_id, secret_key, sub_app_id = _resolve_credentials(
             kwargs.get("secret_id"), kwargs.get("secret_key"), kwargs.get("sub_app_id"))
         region = kwargs.get("region") or ""
@@ -637,7 +643,7 @@ class TencentVODVSVideoTask:
     @classmethod
     def INPUT_TYPES(cls):
         required = {"prompt": ("STRING", {"multiline": True, "default": "",
-                                           "tooltip": "提示词（必填）；多素材时可用「图1…图2…」描述"})}
+                                           "tooltip": "提示词（必填）；引用参考图用 @N 或「图N」（N 从 1 开始，BatchImagesNode 的 image0=第 1 张=@1），例如 @1=皇后、@2=祺贵人；首尾帧用「首帧」「尾帧」描述"})}
         optional = dict(_cred_inputs())          # 凭据选填：留空读 tencent-vod-config.json
         optional.update(_vs_output_config_inputs())
         optional["model_version"] = (cls._MODEL_VERSIONS, {"default": "2.5",
@@ -749,6 +755,11 @@ class TencentVODVSVideoTask:
                            max_audios=10, max_total=50)
         # 计费要素：是否含视频参考素材（VS 有参考视频时输入/输出两段计费，台账据此查表）
         has_video_ref = any(f.get("Category") == "Video" for f in file_infos)
+
+        # @N 引用展开：@1 / @图片1 → 图1（1 基，对应参考图第 N 张，越界报错）
+        prompt = _expand_prompt_refs(prompt, sum(
+            1 for f in file_infos
+            if f.get("Category") == "Image" and f.get("Usage") == "Reference"))
 
         # 种子 / 水印 / ExtInfo（未启用不传，保持 payload 干净）
         seed_raw = kwargs.get("seed", -1)

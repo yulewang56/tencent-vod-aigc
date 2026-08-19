@@ -336,6 +336,27 @@ def parse_multiline(text):
     return [line.strip() for line in text.splitlines() if line.strip()]
 
 
+_REF_RE = re.compile(r"@(?:图片)?(\d+)")
+
+
+def expand_prompt_refs(prompt: str, ref_image_count: int) -> str:
+    """把 prompt 中的 `@N` / `@图片N` 引用替换为 API 多图格式「图N」（1 基）。
+
+    N 对应参考图（Usage=Reference 的 Image 素材）按提交顺序的第 N 张：
+    IMAGE batch 帧序（BatchImagesNode 的 image0 = 第 1 张 = @1）→ 本地路径 → URL。
+    首/尾帧（FirstFrame/LastFrame）不参与编号，用「首帧」「尾帧」描述。
+    N 越界（<1 或 > ref_image_count）抛 ValueError，避免模型幻觉引用不存在的图。
+    """
+    def _repl(m):
+        n = int(m.group(1))
+        if n < 1 or n > ref_image_count:
+            raise ValueError(
+                f"prompt 引用了 @{n}，但当前只有 {ref_image_count} 张参考图"
+                f"（@N 从 1 开始，BatchImagesNode 的 image0 即第 1 张）")
+        return f"图{n}"
+    return _REF_RE.sub(_repl, prompt or "")
+
+
 def validate_media_url(url: str, allowed: tuple, what: str):
     """提交前校验素材 URL 扩展名：明确不在允许列表时本地报错（避免任务跑完才失败）。
 
