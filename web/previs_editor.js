@@ -36376,7 +36376,7 @@ function createThreeRuntime(mainHost, monitorHost, state, onManipulated) {
       const selected = state.selectedKind === "object" && id === state.selectedObjectId;
       root.traverse((child) => {
         if (!child.isMesh || !child.material?.emissive) return;
-        child.material.emissive.copy(selected ? color("--cp-accent-soft") : color("--cp-bg"));
+        child.material.emissive.copy(selected ? color("--cp-accent") : color("--cp-bg"));
         child.material.emissiveIntensity = selected ? 1.5 : 0.05;
       });
     }
@@ -36529,7 +36529,7 @@ function createObjectProxy(item, color) {
   const root = new Group();
   root.name = item.name;
   const material = () => new MeshStandardMaterial({
-    color: color("--cp-surface"),
+    color: color("--cp-text-soft"),
     roughness: 0.72,
     metalness: 0.02,
     emissive: color("--cp-bg")
