@@ -639,6 +639,52 @@ try:
 finally:
     nodes._call_api = _orig_call2
 
+# ---- normalize_prompt_refs 表驱动（v1.16.9：字面量/Unicode/边界）----
+from vod_aigc_core import normalize_prompt_refs as _npr
+_npr_cases = [
+    # (prompt, count, 期望输出或 None=报错)
+    ("人物：@1=皇后、@2=祺贵人", 2, "人物：图1=皇后、图2=祺贵人"),
+    ("@图片1", 1, "图1"),
+    ("@图片1=皇后", 1, "图1=皇后"),
+    ("support@example.com", 0, "support@example.com"),   # 邮箱放行
+    ("foo@1.com", 1, "foo@1.com"),                        # 邮箱内 @1 不转换
+    ("邮件 \\@qq.com 和 @1", 1, "邮件 @qq.com 和 图1"),    # \@ 字面量还原
+    ("普通文本", 0, "普通文本"),
+    ("关注 @queen", 0, None),      # 名称拒绝
+    ("@皇后", 1, None),
+    ("@Élodie", 1, None),          # Unicode 名称
+    ("@キャラ", 1, None),
+    ("@퀸", 1, None),
+    ("@1皇后", 1, None),           # 粘连
+    ("@图片A", 1, None),           # 格式错误
+    ("@图片 1", 1, None),
+    ("@图片1abc", 1, None),
+    ("@0", 1, None),               # 越界
+    ("@2", 1, None),
+]
+for _p, _c, _exp in _npr_cases:
+    try:
+        _r = _npr(_p, _c)
+        check(f"npr: {_p[:18]!r}", _r == _exp, f"got {_r!r} want {_exp!r}")
+    except ValueError:
+        check(f"npr: {_p[:18]!r}", _exp is None, f"unexpected rejection of {_p!r}")
+
+# H3 图生视频：@名称 提交前报错（v1.16.9 补齐）
+_orig_call3 = nodes._call_api
+try:
+    try:
+        nodes.TencentVODH3ImageToVideo().generate("人物：@皇后 坐着", first_frame_url="https://x/a.png",
+                                                  secret_id="x", secret_key="y", sub_app_id="1",
+                                                  duration=5, resolution="1080P", aspect_ratio="16:9",
+                                                  audio_generation="Enabled", storage_mode="Temporary",
+                                                  enhance_prompt="Disabled", use_cache="Disabled",
+                                                  poll_interval=3, timeout=60)
+        check("h3 i2v: @名称 blocks submit", False)
+    except ValueError as e:
+        check("h3 i2v: @名称 blocks submit", "@皇后" in str(e), str(e)[:60])
+finally:
+    nodes._call_api = _orig_call3
+
 # ---- 汇总 ----
 print()
 print()
