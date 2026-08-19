@@ -44,6 +44,7 @@ from vod_aigc_core import (
     extract_asset_id as _extract_asset_id,
     parse_multiline as _parse_multiline,
     expand_prompt_refs as _expand_prompt_refs,
+    annotate_content_refs as _annotate_content_refs,
     validate_media_url as _validate_media_url,
     check_media_quota as _check_media_quota,
     save_config_file as _save_config_file,
@@ -730,6 +731,7 @@ class TencentVODVSVideoTask:
         _validate_vs_options(model_version, duration, resolution)
 
         file_infos = []
+        ref_names = []  # 与 file_infos 同序的素材名（报错 content[N] 映射用）
         base64_total = 0
 
         # 首帧 / 尾帧（IMAGE / 本地路径 / URL 三选一，Usage=FirstFrame/LastFrame）
@@ -745,15 +747,18 @@ class TencentVODVSVideoTask:
                 if base64_total > _MAX_BASE64_TOTAL:
                     raise ValueError("Base64 素材总大小超过 70MB 上限")
                 file_infos.append({"Type": "Base64", "Category": "Image", "Base64": data, "Usage": usage})
+                ref_names.append(f"{'首帧' if usage == 'FirstFrame' else '尾帧'}图(IMAGE)")
             elif url:
                 _validate_media_url(url, _ALLOWED_IMAGE_EXTS, f"{usage}图")
                 file_infos.append({"Type": "Url", "Category": "Image", "Url": url, "Usage": usage})
+                ref_names.append(f"{'首帧' if usage == 'FirstFrame' else '尾帧'}图({url[:40]})")
             elif path:
                 data = _file_to_base64(path, _MAX_IMAGE_BYTES, f"{usage}图", _ALLOWED_IMAGE_EXTS, image=True)
                 base64_total += len(data)
                 if base64_total > _MAX_BASE64_TOTAL:
                     raise ValueError("Base64 素材总大小超过 70MB 上限")
                 file_infos.append({"Type": "Base64", "Category": "Image", "Base64": data, "Usage": usage})
+                ref_names.append(f"{'首帧' if usage == 'FirstFrame' else '尾帧'}图({os.path.basename(path)})")
 
         # 多模态参考（Usage=Reference）
         ref_images = kwargs.get("ref_images")
@@ -767,33 +772,40 @@ class TencentVODVSVideoTask:
                 if base64_total > _MAX_BASE64_TOTAL:
                     raise ValueError("Base64 素材总大小超过 70MB 上限")
                 file_infos.append({"Type": "Base64", "Category": "Image", "Base64": data, "Usage": "Reference"})
+                ref_names.append(f"参考图第{i+1}帧(IMAGE)")
         for path in _parse_multiline(kwargs.get("ref_image_paths")):
             data = _file_to_base64(path, _MAX_IMAGE_BYTES, "参考图", _ALLOWED_IMAGE_EXTS, image=True)
             base64_total += len(data)
             if base64_total > _MAX_BASE64_TOTAL:
                 raise ValueError("Base64 素材总大小超过 70MB 上限")
             file_infos.append({"Type": "Base64", "Category": "Image", "Base64": data, "Usage": "Reference"})
+            ref_names.append(os.path.basename(path))
         for url in _parse_multiline(kwargs.get("ref_image_urls")):
             _validate_media_url(url, _ALLOWED_IMAGE_EXTS, "参考图")
             file_infos.append({"Type": "Url", "Category": "Image", "Url": url, "Usage": "Reference"})
+            ref_names.append(url[:40])
         for path in _parse_multiline(kwargs.get("ref_video_paths")):
             data = _file_to_base64(path, _MAX_VIDEO_BYTES, "参考视频", _ALLOWED_VIDEO_EXTS)
             base64_total += len(data)
             if base64_total > _MAX_BASE64_TOTAL:
                 raise ValueError("Base64 素材总大小超过 70MB 上限")
             file_infos.append({"Type": "Base64", "Category": "Video", "Base64": data, "Usage": "Reference"})
+            ref_names.append(f"参考视频({os.path.basename(path)})")
         for url in _parse_multiline(kwargs.get("ref_video_urls")):
             _validate_media_url(url, _ALLOWED_VIDEO_EXTS, "参考视频")
             file_infos.append({"Type": "Url", "Category": "Video", "Url": url, "Usage": "Reference"})
+            ref_names.append(f"参考视频({url[:40]})")
         for path in _parse_multiline(kwargs.get("ref_audio_paths")):
             data = _file_to_base64(path, _MAX_AUDIO_BYTES, "参考音频", _ALLOWED_AUDIO_EXTS)
             base64_total += len(data)
             if base64_total > _MAX_BASE64_TOTAL:
                 raise ValueError("Base64 素材总大小超过 70MB 上限")
             file_infos.append({"Type": "Base64", "Category": "Audio", "Base64": data, "Usage": "Reference"})
+            ref_names.append(f"参考音频({os.path.basename(path)})")
         for url in _parse_multiline(kwargs.get("ref_audio_urls")):
             _validate_media_url(url, _ALLOWED_AUDIO_EXTS, "参考音频")
             file_infos.append({"Type": "Url", "Category": "Audio", "Url": url, "Usage": "Reference"})
+            ref_names.append(f"参考音频({url[:40]})")
 
         # 素材配额（VS 上限：图≤30 / 视频≤10 / 音频≤10 / 总数≤50 / 音频不能单独 / Base64≤70MB）
         _check_media_quota(file_infos, base64_total, max_images=30, max_videos=10,
@@ -829,10 +841,14 @@ class TencentVODVSVideoTask:
         task_id = response.get("TaskId")
         if not task_id:
             raise RuntimeError(f"未返回 TaskId（原始响应: {json.dumps(response, ensure_ascii=False)[:400]}）")
-        result = _wait_for_task(secret_id, secret_key, region, endpoint, sub_app_id, task_id,
-                                kwargs.get("poll_interval", 10), kwargs.get("timeout", 1800),
-                                on_progress=lambda t: _set_status(self, t),
-                                task_label=f"VS {model_version} 视频生成中")
+        try:
+            result = _wait_for_task(secret_id, secret_key, region, endpoint, sub_app_id, task_id,
+                                    kwargs.get("poll_interval", 10), kwargs.get("timeout", 1800),
+                                    on_progress=lambda t: _set_status(self, t),
+                                    task_label=f"VS {model_version} 视频生成中")
+        except TaskError as _err:
+            # 版权/人脸等任务级拒绝：把 content[N] 映射回素材名，便于定位是哪张素材被拦
+            raise TaskError(_err.task_id, _annotate_content_refs(str(_err), ref_names)) from None
         last_frame_url = ""
         if kwargs.get("return_last_frame", "Disabled") == "Enabled":
             video_url, last_frame_url = _extract_video_and_lastframe(result["detail"])

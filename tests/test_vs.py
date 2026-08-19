@@ -593,6 +593,17 @@ try:
 finally:
     nodes._call_api = _orig_call
 
+# ---- content[N] → 素材名映射（版权/人脸拒绝报错可读性）----
+from vod_aigc_core import annotate_content_refs as _acr
+_ann_msg = "input image 'content[2]' 'content[3]' 'content[5]' may be related to copyright"
+_ann_names = ["图片1.jpg", "图片2.jpg", "图片3.jpg", "图片4.jpg", "图片5.jpg"]
+_ann_out = _acr(_ann_msg, _ann_names)
+check("annotate: content[2]->图片3.jpg", "content[2](图片3.jpg)" in _ann_out, _ann_out)
+check("annotate: content[3]->图片4.jpg", "content[3](图片4.jpg)" in _ann_out)
+check("annotate: out-of-range kept raw", "content[5]" in _ann_out and "content[5](" not in _ann_out)
+check("annotate: empty names passthrough", _acr(_ann_msg, None) == _ann_msg)
+check("annotate: None message ok", _acr(None, _ann_names) == "")
+
 # ---- 汇总 ----
 print()
 print()
