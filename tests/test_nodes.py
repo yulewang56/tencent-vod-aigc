@@ -104,6 +104,9 @@ check("previs: legacy widget order preserved",
 check("previs: legacy outputs remain prefix",
       nodes.TencentVOD3DPrevis.RETURN_NAMES[:4]
       == ("frames", "camera_plan", "scene_plan", "reference_prompt"))
+check("previs: integrated scene fields appended",
+      list(previs_inputs["optional"])[-4:] == [
+          "scene_source", "background_transform", "generated_task_id", "render_cache_path"])
 
 # ---- 2. TC3 signing ----
 headers, body = nodes._sign_request("AKIDtest123", "secretKey456", "ap-guangzhou",
@@ -1036,6 +1039,73 @@ if hasattr(nodes.Image, "new") and hasattr(nodes.np, "asarray"):
               and bool(rendered[3])
               and isinstance(rendered[4], FakeVideo)
               and rendered[5] == "", str(tuple(rendered[0].shape)))
+
+        import tempfile as _tempfile_previs
+        with _tempfile_previs.TemporaryDirectory() as cache_root:
+            original_output = nodes.folder_paths.get_output_directory
+            nodes.folder_paths.get_output_directory = lambda: cache_root
+            try:
+                render_id = "a" * 32
+                render_dir = nodes._previs_root("previs_renders", render_id)
+                os.makedirs(render_dir)
+                frame_names = []
+                for index in range(2):
+                    name = f"frame_{index:04d}.png"
+                    nodes.Image.new("RGB", (320, 176), (index * 20, 30, 40)).save(
+                        os.path.join(render_dir, name))
+                    frame_names.append(name)
+                cached_background = {
+                    "source": "Blank",
+                    "path": "",
+                    "taskId": "",
+                    "transform": {
+                        "position": [0, 0, 0],
+                        "rotation": [0, 0, 0],
+                        "scale": 1,
+                    },
+                }
+                manifest_path = os.path.join(render_dir, "manifest.json")
+                with open(manifest_path, "w", encoding="utf-8") as manifest_file:
+                    json.dump({
+                        "version": 1,
+                        "frame_count": 2,
+                        "width": 320,
+                        "height": 176,
+                        "fps": 24.0,
+                        "signature": nodes._previs_manifest_signature(
+                            scene_3d, camera_3d, cached_background),
+                        "frames": frame_names,
+                    }, manifest_file)
+                cached = nodes._previs_load_render_cache(
+                    manifest_path, scene_3d, camera_3d, 2, 320, 176, 24,
+                    cached_background)
+                check("previs: WebGL render cache loads",
+                      len(cached) == 2 and all(image.size == (320, 176) for image in cached))
+                rendered_cached = nodes.TencentVOD3DPrevis().render(
+                    nodes._DEFAULT_PREVIS_SCENE, nodes._DEFAULT_PREVIS_CAMERA,
+                    frame_count=2, width=320, height=176, render_cache_path=manifest_path)
+                check("previs: node consumes WebGL render cache",
+                      tuple(rendered_cached[0].shape) == (2, 176, 320, 3)
+                      and float(rendered_cached[0][1, 0, 0, 0]) > 0)
+                try:
+                    nodes._previs_load_render_cache(
+                        manifest_path, {"version": 3, "objects": []},
+                        camera_3d, 2, 320, 176, 24, cached_background)
+                    check("previs: stale WebGL cache rejected", False)
+                except ValueError as error:
+                    check("previs: stale WebGL cache rejected", "已过期" in str(error), str(error))
+                try:
+                    changed_background = dict(cached_background)
+                    changed_background["path"] = "/tmp/other.spz"
+                    nodes._previs_load_render_cache(
+                        manifest_path, scene_3d, camera_3d, 2, 320, 176, 24,
+                        changed_background)
+                    check("previs: stale background cache rejected", False)
+                except ValueError as error:
+                    check("previs: stale background cache rejected",
+                          "已过期" in str(error), str(error))
+            finally:
+                nodes.folder_paths.get_output_directory = original_output
 
 
 # ---- 汇总 ----

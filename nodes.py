@@ -17,11 +17,15 @@
 
 import base64
 import functools
+import hashlib
 import io
 import json
 import os
+import re
+import threading
 import urllib.parse
 import urllib.request
+import uuid
 from fractions import Fraction
 
 import numpy as np
@@ -230,6 +234,9 @@ def _set_status(node, text: str):
         node.display_string = text
     except Exception:
         pass
+    callback = getattr(node, "_status_callback", None)
+    if callback is not None:
+        callback(text)
 
 
 _REF_IMAGE_TARGET = int(1.2 * 1024 * 1024)  # 参考图单张压缩目标（网关请求体 10MB，5 图场景留余量）
@@ -316,6 +323,158 @@ def _next_previs_video_path(filename_prefix):
         if not os.path.exists(path):
             return path
         counter += 1
+
+
+_PREVIS_ID_RE = re.compile(r"^[a-f0-9]{32}$")
+_PREVIS_JOB_LOCK = threading.Lock()
+_PREVIS_WORLD_JOBS = {}
+_PREVIS_RENDER_SESSIONS = {}
+
+
+def _previs_root(kind, identifier, base_dir=None):
+    if not _PREVIS_ID_RE.fullmatch(str(identifier or "")):
+        raise ValueError("无效的预演任务 ID")
+    root = base_dir or folder_paths.get_output_directory()
+    return os.path.join(root, "vod_aigc", kind, identifier)
+
+
+def _previs_update_job(job_id, **values):
+    with _PREVIS_JOB_LOCK:
+        job = _PREVIS_WORLD_JOBS.get(job_id)
+        if job is not None:
+            job.update(values)
+
+
+def _previs_job_snapshot(job_id):
+    with _PREVIS_JOB_LOCK:
+        job = _PREVIS_WORLD_JOBS.get(job_id)
+        return dict(job) if job is not None else None
+
+
+def _previs_cleanup_uploads(paths, directory):
+    for path in paths:
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+        except OSError:
+            pass
+    try:
+        os.rmdir(directory)
+    except OSError:
+        pass
+
+
+def _previs_cleanup_render_session(session):
+    directory = session.get("directory", "")
+    frame_count = int(session.get("frame_count", 0))
+    for index in range(frame_count):
+        for suffix in (".png", ".png.part"):
+            path = os.path.join(directory, f"frame_{index:04d}{suffix}")
+            try:
+                if os.path.isfile(path):
+                    os.remove(path)
+            except OSError:
+                pass
+    manifest_path = os.path.join(directory, "manifest.json")
+    try:
+        if os.path.isfile(manifest_path):
+            os.remove(manifest_path)
+    except OSError:
+        pass
+    try:
+        os.rmdir(directory)
+    except OSError:
+        pass
+
+
+def _previs_run_world_job(job_id, prompt, image_paths, upload_dir, options):
+    node = TencentVODHunyuan3DWorld()
+    node._status_callback = lambda text: _previs_update_job(
+        job_id, status="running", message=text)
+    try:
+        result = node.generate(
+            prompt,
+            image_path="\n".join(image_paths),
+            storage_mode=options.get("storage_mode", "Temporary"),
+            filename=options.get("filename", "hunyuan_3d_world"),
+            region=options.get("region", DEFAULT_REGION),
+            endpoint=options.get("endpoint", ""),
+            input_region=options.get("input_region", ""),
+            poll_interval=options.get("poll_interval", 10),
+            timeout=options.get("timeout", 1800),
+            use_cache=options.get("use_cache", "Enabled"),
+        )
+        _previs_update_job(
+            job_id,
+            status="complete",
+            message="3D 场景已生成并加载",
+            task_id=result[0],
+            scene_url=result[1],
+            scene_path=result[2],
+        )
+    except Exception as error:
+        _previs_update_job(job_id, status="error", message=str(error))
+    finally:
+        _previs_cleanup_uploads(image_paths, upload_dir)
+
+
+def _previs_canonical(value):
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _previs_manifest_signature(scene, camera, background=None):
+    source = (
+        f"{_previs_canonical(scene)}\n"
+        f"{_previs_canonical(camera)}\n"
+        f"{_previs_canonical(background or {})}"
+    )
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
+def _previs_load_render_cache(
+        manifest_path, scene, camera, frame_count, width, height, fps, background=None):
+    if not manifest_path:
+        return None
+    path = os.path.realpath(os.path.expanduser(str(manifest_path)))
+    output_root = os.path.realpath(folder_paths.get_output_directory())
+    if os.path.commonpath((path, output_root)) != output_root:
+        raise ValueError("预演渲染缓存必须位于 ComfyUI output 目录")
+    if os.path.basename(path) != "manifest.json" or not os.path.isfile(path):
+        raise ValueError(f"预演渲染缓存不存在: {manifest_path}")
+    with open(path, encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    expected = {
+        "frame_count": int(frame_count),
+        "width": int(width),
+        "height": int(height),
+        "fps": float(fps),
+        "signature": _previs_manifest_signature(scene, camera, background),
+    }
+    for key, value in expected.items():
+        actual = manifest.get(key)
+        if key == "fps":
+            matches = abs(float(actual or 0) - value) < 1e-6
+        else:
+            matches = actual == value
+        if not matches:
+            raise ValueError(
+                f"预演渲染缓存已过期（{key} 不一致），请在 3D 编辑器中重新导出")
+    frame_names = manifest.get("frames")
+    if not isinstance(frame_names, list) or len(frame_names) != int(frame_count):
+        raise ValueError("预演渲染缓存帧列表不完整，请重新导出")
+    images = []
+    cache_dir = os.path.dirname(path)
+    for name in frame_names:
+        if os.path.basename(str(name)) != str(name):
+            raise ValueError("预演渲染缓存包含非法帧路径")
+        frame_path = os.path.join(cache_dir, name)
+        if not os.path.isfile(frame_path):
+            raise ValueError(f"预演渲染缓存缺少帧: {name}")
+        with Image.open(frame_path) as image:
+            if image.size != (int(width), int(height)):
+                raise ValueError(f"预演渲染缓存帧尺寸不一致: {name}")
+            images.append(image.convert("RGB").copy())
+    return images
 
 
 _DEFAULT_PREVIS_SCENE = json.dumps({
@@ -1128,13 +1287,27 @@ def _previs_reference_prompt(scene, camera):
 
 
 def _register_http_routes():
-    """注册配置接口和受限的本地 3D 资产读取接口。"""
+    """注册配置、预演任务、预演渲染和受限本地资产接口。"""
     try:
         from aiohttp import web
         from server import PromptServer
         routes = PromptServer.instance.routes  # ComfyUI 进程外导入（如脚本）时 instance 不存在
     except Exception:
         return
+
+    def previs_mutation_allowed(request):
+        if request.headers.get("X-Tencent-VOD-AIGC") != "previs":
+            return False
+        origin = (request.headers.get("Origin") or "").strip()
+        if not origin:
+            return False
+        parsed = urllib.parse.urlparse(origin)
+        return parsed.scheme in ("http", "https") and parsed.netloc == request.host
+
+    def previs_forbidden():
+        return web.json_response(
+            {"ok": False, "error": "预演接口仅接受当前 ComfyUI 页面发起的同源请求"},
+            status=403)
 
     async def config_status(_request):
         cfg = _load_config_file()
@@ -1178,9 +1351,234 @@ def _register_http_routes():
             return web.json_response({"error": "3D 资产不存在"}, status=404)
         return web.FileResponse(path, headers={"Content-Disposition": "inline"})
 
+    async def previs_world_create(request):
+        if not previs_mutation_allowed(request):
+            return previs_forbidden()
+        if not request.content_type.startswith("multipart/"):
+            return web.json_response(
+                {"ok": False, "error": "场景生成请求必须使用 multipart/form-data"},
+                status=400)
+        job_id = uuid.uuid4().hex
+        temp_getter = getattr(folder_paths, "get_temp_directory", None)
+        temp_root = temp_getter() if temp_getter is not None else folder_paths.get_input_directory()
+        upload_dir = _previs_root("previs_uploads", job_id, temp_root)
+        os.makedirs(upload_dir, exist_ok=False)
+        fields = {}
+        image_paths = []
+        try:
+            reader = await request.multipart()
+            async for part in reader:
+                if part.name != "image":
+                    fields[part.name] = (await part.text()).strip()
+                    continue
+                if len(image_paths) >= 3:
+                    raise ValueError("3D 世界参考图最多 3 张")
+                data = bytearray()
+                while True:
+                    chunk = await part.read_chunk()
+                    if not chunk:
+                        break
+                    data.extend(chunk)
+                    if len(data) > _MAX_IMAGE_BYTES:
+                        raise ValueError("单张参考图超过 30MB 上限")
+                try:
+                    with Image.open(io.BytesIO(data)) as source:
+                        source.verify()
+                    with Image.open(io.BytesIO(data)) as source:
+                        compressed = _compress_image(source)
+                except (OSError, ValueError) as error:
+                    raise ValueError(f"参考图不是有效图片: {error}") from error
+                path = os.path.join(upload_dir, f"reference_{len(image_paths) + 1}.jpg")
+                with open(path, "wb") as handle:
+                    handle.write(compressed)
+                image_paths.append(path)
+            prompt = fields.get("prompt", "")
+            if not prompt:
+                raise ValueError("Prompt 不能为空")
+            if fields.get("confirmed") != "true":
+                raise ValueError("提交前必须确认这会创建真实的 Tencent VOD 付费任务")
+            storage_mode = fields.get("storage_mode", "Temporary")
+            if storage_mode not in STORAGE_MODES:
+                raise ValueError("storage_mode 无效")
+            options = {
+                "storage_mode": storage_mode,
+                "filename": fields.get("filename", "hunyuan_3d_world"),
+                "input_region": fields.get("input_region", ""),
+                "use_cache": fields.get("use_cache", "Enabled"),
+            }
+            with _PREVIS_JOB_LOCK:
+                _PREVIS_WORLD_JOBS[job_id] = {
+                    "job_id": job_id,
+                    "status": "queued",
+                    "message": "等待提交混元 3D 世界任务…",
+                    "task_id": "",
+                    "scene_url": "",
+                    "scene_path": "",
+                }
+            worker = threading.Thread(
+                target=_previs_run_world_job,
+                args=(job_id, prompt, image_paths, upload_dir, options),
+                name=f"vod-previs-world-{job_id[:8]}",
+                daemon=True,
+            )
+            worker.start()
+            return web.json_response({"ok": True, "job_id": job_id}, status=202)
+        except ValueError as error:
+            _previs_cleanup_uploads(image_paths, upload_dir)
+            return web.json_response({"ok": False, "error": str(error)}, status=400)
+
+    async def previs_world_status(request):
+        job_id = request.match_info.get("job_id", "")
+        if not _PREVIS_ID_RE.fullmatch(job_id):
+            return web.json_response({"ok": False, "error": "无效的任务 ID"}, status=400)
+        job = _previs_job_snapshot(job_id)
+        if job is None:
+            return web.json_response({"ok": False, "error": "任务不存在"}, status=404)
+        return web.json_response({"ok": True, **job})
+
+    async def previs_render_create(request):
+        if not previs_mutation_allowed(request):
+            return previs_forbidden()
+        try:
+            body = await request.json()
+            frame_count = int(body.get("frame_count"))
+            width = int(body.get("width"))
+            height = int(body.get("height"))
+            fps = float(body.get("fps"))
+            if not 2 <= frame_count <= 120:
+                raise ValueError("frame_count 必须在 2-120 之间")
+            if not 256 <= width <= 1280 or not 144 <= height <= 720:
+                raise ValueError("渲染尺寸超出预演台允许范围")
+            if not 1 <= fps <= 120:
+                raise ValueError("fps 必须在 1-120 之间")
+            raw_scene = body.get("scene")
+            raw_camera = body.get("camera")
+            background = body.get("background")
+            if not isinstance(background, dict):
+                raise ValueError("background 必须是对象")
+            scene = _parse_previs_scene(
+                raw_scene if isinstance(raw_scene, str)
+                else json.dumps(raw_scene, ensure_ascii=False))
+            camera = _parse_previs_camera(
+                raw_camera if isinstance(raw_camera, str)
+                else json.dumps(raw_camera, ensure_ascii=False))
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            return web.json_response({"ok": False, "error": str(error)}, status=400)
+        render_id = uuid.uuid4().hex
+        render_dir = _previs_root("previs_renders", render_id)
+        os.makedirs(render_dir, exist_ok=False)
+        session = {
+            "render_id": render_id,
+            "directory": render_dir,
+            "frame_count": frame_count,
+            "width": width,
+            "height": height,
+            "fps": fps,
+            "signature": _previs_manifest_signature(scene, camera, background),
+            "uploaded": set(),
+        }
+        with _PREVIS_JOB_LOCK:
+            _PREVIS_RENDER_SESSIONS[render_id] = session
+        return web.json_response({"ok": True, "render_id": render_id}, status=201)
+
+    async def previs_render_frame(request):
+        if not previs_mutation_allowed(request):
+            return previs_forbidden()
+        render_id = request.match_info.get("render_id", "")
+        try:
+            index = int(request.match_info.get("index", ""))
+        except ValueError:
+            return web.json_response({"ok": False, "error": "帧序号无效"}, status=400)
+        with _PREVIS_JOB_LOCK:
+            session = _PREVIS_RENDER_SESSIONS.get(render_id)
+        if session is None:
+            return web.json_response({"ok": False, "error": "渲染会话不存在"}, status=404)
+        if not 0 <= index < session["frame_count"]:
+            return web.json_response({"ok": False, "error": "帧序号超出范围"}, status=400)
+        if request.content_length is not None and request.content_length > 12 * 1024 * 1024:
+            return web.json_response({"ok": False, "error": "单帧超过 12MB 上限"}, status=413)
+        data = await request.read()
+        if len(data) > 12 * 1024 * 1024:
+            return web.json_response({"ok": False, "error": "单帧超过 12MB 上限"}, status=413)
+        try:
+            with Image.open(io.BytesIO(data)) as image:
+                image.verify()
+            with Image.open(io.BytesIO(data)) as image:
+                if image.size != (session["width"], session["height"]):
+                    raise ValueError(
+                        f"帧尺寸应为 {session['width']}×{session['height']}，"
+                        f"实际为 {image.size[0]}×{image.size[1]}")
+        except (OSError, ValueError) as error:
+            return web.json_response({"ok": False, "error": str(error)}, status=400)
+        name = f"frame_{index:04d}.png"
+        path = os.path.join(session["directory"], name)
+        partial_path = f"{path}.part"
+        with open(partial_path, "wb") as handle:
+            handle.write(data)
+        os.replace(partial_path, path)
+        with _PREVIS_JOB_LOCK:
+            session["uploaded"].add(index)
+        return web.json_response({"ok": True, "index": index})
+
+    async def previs_render_complete(request):
+        if not previs_mutation_allowed(request):
+            return previs_forbidden()
+        render_id = request.match_info.get("render_id", "")
+        with _PREVIS_JOB_LOCK:
+            session = _PREVIS_RENDER_SESSIONS.get(render_id)
+        if session is None:
+            return web.json_response({"ok": False, "error": "渲染会话不存在"}, status=404)
+        missing = [
+            index for index in range(session["frame_count"])
+            if index not in session["uploaded"]
+        ]
+        if missing:
+            return web.json_response(
+                {"ok": False, "error": f"仍缺少 {len(missing)} 帧"}, status=409)
+        frames = [f"frame_{index:04d}.png" for index in range(session["frame_count"])]
+        manifest = {
+            "version": 1,
+            "frame_count": session["frame_count"],
+            "width": session["width"],
+            "height": session["height"],
+            "fps": session["fps"],
+            "signature": session["signature"],
+            "frames": frames,
+        }
+        manifest_path = os.path.join(session["directory"], "manifest.json")
+        with open(manifest_path, "w", encoding="utf-8") as handle:
+            json.dump(manifest, handle, ensure_ascii=False, indent=2)
+        with _PREVIS_JOB_LOCK:
+            _PREVIS_RENDER_SESSIONS.pop(render_id, None)
+        return web.json_response({
+            "ok": True,
+            "render_id": render_id,
+            "manifest_path": manifest_path,
+        })
+
+    async def previs_render_abort(request):
+        if not previs_mutation_allowed(request):
+            return previs_forbidden()
+        render_id = request.match_info.get("render_id", "")
+        with _PREVIS_JOB_LOCK:
+            session = _PREVIS_RENDER_SESSIONS.pop(render_id, None)
+        if session is None:
+            return web.json_response({"ok": True, "removed": False})
+        _previs_cleanup_render_session(session)
+        return web.json_response({"ok": True, "removed": True})
+
     routes.get("/tencent-vod-aigc/config")(config_status)
     routes.post("/tencent-vod-aigc/config")(config_save)
     routes.get("/tencent-vod-aigc/asset")(local_3d_asset)
+    routes.post("/tencent-vod-aigc/previs/world-tasks")(previs_world_create)
+    routes.get("/tencent-vod-aigc/previs/world-tasks/{job_id}")(previs_world_status)
+    routes.post("/tencent-vod-aigc/previs/renders")(previs_render_create)
+    routes.put("/tencent-vod-aigc/previs/renders/{render_id}/frames/{index}")(
+        previs_render_frame)
+    routes.post("/tencent-vod-aigc/previs/renders/{render_id}/complete")(
+        previs_render_complete)
+    routes.delete("/tencent-vod-aigc/previs/renders/{render_id}")(
+        previs_render_abort)
 
 
 # ---------------------------------------------------------------- 执行台账
@@ -2180,6 +2578,20 @@ class TencentVOD3DPrevis:
             "filename_prefix": ("STRING", {
                 "default": "previs",
                 "tooltip": "导出 MP4 文件名前缀"}),
+            "scene_source": (["Blank", "Local Asset", "Tencent VOD Generated"], {
+                "default": "Blank",
+                "tooltip": "预演编辑器中的场景来源；云端生成只会在明确确认后提交"}),
+            "background_transform": ("STRING", {
+                "default": json.dumps({
+                    "position": [0, 0, 0], "rotation": [0, 0, 0], "scale": 1
+                }),
+                "tooltip": "编辑器保存的背景场景位置、旋转和统一缩放"}),
+            "generated_task_id": ("STRING", {
+                "default": "",
+                "tooltip": "预演台内创建的混元 3D 世界任务 ID"}),
+            "render_cache_path": ("STRING", {
+                "default": "",
+                "tooltip": "编辑器确定性逐帧渲染缓存；场景或镜头修改后必须重新导出"}),
         }
         return {"required": required, "optional": optional}
 
@@ -2196,7 +2608,9 @@ class TencentVOD3DPrevis:
 
     def render(self, scene_json, camera_json, frame_count, width, height, fps=24.0,
                background_asset=None, background_asset_path="", show_overlay="Enabled",
-               export_video="Disabled", filename_prefix="previs"):
+               export_video="Disabled", filename_prefix="previs", scene_source="Blank",
+               background_transform='{"position":[0,0,0],"rotation":[0,0,0],"scale":1}',
+               generated_task_id="", render_cache_path=""):
         scene = _parse_previs_scene(scene_json)
         camera = _parse_previs_camera(camera_json)
         asset_path = (background_asset_path or "").strip()
@@ -2204,10 +2618,25 @@ class TencentVOD3DPrevis:
             source = background_asset.get_source()
             if isinstance(source, str):
                 asset_path = source
-        images = _render_previs_images(
-            scene, camera, int(width), int(height), int(frame_count),
-            background_asset=asset_path,
-            show_overlay=show_overlay == "Enabled")
+        try:
+            transform = json.loads(background_transform or "{}")
+        except json.JSONDecodeError as error:
+            raise ValueError(f"background_transform 不是合法 JSON: {error}") from error
+        if not isinstance(transform, dict):
+            raise ValueError("background_transform 必须是 JSON 对象")
+        background = {
+            "source": str(scene_source or "Blank"),
+            "path": asset_path,
+            "taskId": str(generated_task_id or ""),
+            "transform": transform,
+        }
+        images = _previs_load_render_cache(
+            render_cache_path, scene, camera, frame_count, width, height, fps, background)
+        if images is None:
+            images = _render_previs_images(
+                scene, camera, int(width), int(height), int(frame_count),
+                background_asset=asset_path,
+                show_overlay=show_overlay == "Enabled")
         try:
             import torch
             frames = torch.stack([

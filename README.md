@@ -20,7 +20,7 @@ ComfyUI 自定义节点：通过**腾讯云 VOD AIGC** 聚合服务调用 **Mini
 | `VOD AIGC - 文生图/图生图` | 生图：GEM / Jimeng（3.3.2）+ GPT-Image2（3.14，OG image2_low/medium/high），支持多图输出（1-8 张）、输出格式，可接 ComfyUI 图像、本地图片路径或参考图 URL；`preview_image` 输出 IMAGE 张量（原生预览 + 可接下游） |
 | `VOD AIGC - 音乐生成 (MPS)` | AI 音乐生成：GL / MiniMaxMusic，支持歌词与纯音乐、参考音频（路径/URL）、mp3/wav 输出 |
 | `VOD AIGC - 混元 3D 世界生成` | VOD `Hunyuan / 3d_2.0 / 3d_scene`：文本或 1-3 张参考图生成可漫游 3D 世界，输出本地路径和原生 `FILE_3D`（当前文档示例通常为 `.spz`） |
-| `VOD AIGC - 3D 白模预演台` | 无需云端凭据；WebGL 主视窗编辑立体人物/体块、曲线与速度、多摄影机/切镜，输出 `IMAGE`、原生 `VIDEO` 与可选 MP4 |
+| `VOD AIGC - 3D 白模预演台` | 一体化 WebGL 工作台：空白/本地/SPZ 云端生成场景、立体人物、曲线速度、多摄影机/切镜及确定性镜头输出；只有主动确认生成场景时才调用 VOD |
 | `VOD AIGC - 查询任务` | 按 TaskId 查状态（超时/失败排查用） |
 | `VOD AIGC - 下载视频` | 按 URL 重新下载视频 |
 | `VOD AIGC - 查看执行台账` | 显示 `output/vod_aigc/execution_history.jsonl` 中的历史记录（右下角浮窗） |
@@ -53,7 +53,8 @@ git clone https://github.com/yulewang56/tencent-vod-aigc.git
 SecretId / SecretKey / SubAppId（单价为选填，用于台账费用预估）→ 保存。
 密钥只写入本地配置文件，不进入工作流 JSON。
 
-`VOD AIGC - 3D 白模预演台` 完全在本地运行，不需要腾讯云凭据。
+`VOD AIGC - 3D 白模预演台` 的白模编辑、本地资产加载和预演渲染完全在本地运行；只有在
+编辑器内选择「Tencent VOD Generated」、勾选费用确认并点击生成时，才需要凭据并创建云端任务。
 
 **方式二：手动创建配置文件**
 
@@ -165,8 +166,13 @@ cp tencent-vod-config.example.json tencent-vod-config.json
 
 **3D 白模预演台**：
 
+- 同一个编辑器内提供 `Blank / Local Asset / Tencent VOD Generated` 三种场景来源；云端模式
+  可上传 1-3 张参考图并输入 Prompt，只有勾选付费确认后才能提交，前端持续显示任务状态，完成后
+  自动下载并进入当前编辑空间
 - 点击节点上的「打开 3D 预演编辑器」进入 Three.js WebGL 主视窗；人物使用球体/胶囊/
   圆柱组合的立体 humanoid 简模，体块和球体也是实际 3D mesh
+- SPZ 使用本地打包的 Spark 2.1.0 在主视窗和摄影机观察窗原生渲染；GLB/GLTF/OBJ/PLY
+  继续使用 Three.js loader。背景支持 Position、Rotation（度）、统一 Scale 和按边界居中落地
 - 主视窗支持透视/顶/前/侧视图、Orbit 浏览、TransformControls 和轨迹控制点拖拽；
   右上角镜头观察窗可独立选择摄影机或跟随当前切镜
 - 对象和摄影机 Position / Look At 轨迹支持 `linear`、`catmull_rom`、`bezier`，速度支持
@@ -178,9 +184,12 @@ cp tencent-vod-config.example.json tencent-vod-config.json
   保存时仍同步兼容字段
 - 节点输出 `IMAGE` batch 和原生 `VIDEO`；`fps` 控制帧率，启用 `export_video` 后同时写出 MP4，
   可直接连接 ComfyUI `Save Video` 或支持视频输入的下游节点，不再依赖 VideoHelperSuite
-- `scene_path` 可连接到 `background_asset_path`，`scene_3d` 可连接到 `background_asset`。
-  编辑器可加载 ComfyUI input/output/temp 下的 GLB/GLTF/OBJ/PLY；SPZ/3DGS 当前需使用
-  ComfyUI 原生 Preview Splat 查看，尚未合成到本节点的离线预演帧
+- 点击编辑器底部「渲染镜头输出」会严格按 frame_count/fps 和 cuts 逐帧渲染右上角摄影机；
+  缓存包含 SPZ、人物和其他场景物体。节点执行时校验场景/相机快照，修改后未重新渲染会明确报错，
+  防止静默输出旧视频
+- `scene_path` 仍可写入 `background_asset_path`，`scene_3d` 仍可连接 `background_asset` 供节点
+  执行使用；由于 ComfyUI 前端无法在打开编辑器时读取尚未执行的上游值，交互预览推荐在场景来源
+  面板中直接生成，或填写已经存在的本地路径
 - `reference_prompt` 输出会概括镜头和人物运动，可与预演 MP4 一起提供给支持参考视频的生成节点；
   生成模型把它作为运动/运镜参考，不保证逐帧复现摄影机轨迹
 
@@ -221,18 +230,23 @@ VOD AIGC - H3 图生视频（first_frame ← Load Image 输出）
 VideoHelperSuite / 其他视频节点 → 后处理
 ```
 
-**混元场景 → 白模运镜 → 参考视频**：
+**一体化混元场景 → 白模运镜 → 参考视频**：
 
 ```
-VOD AIGC - 混元 3D 世界生成
-    ├─ scene_path → VOD AIGC - 3D 白模预演台 / background_asset_path
-    └─ scene_3d   → Preview 3D / Preview Splat
-VOD AIGC - 3D 白模预演台（WebGL 编辑人物、曲线速度、多摄影机与切镜）
+VOD AIGC - 3D 白模预演台
+    打开编辑器
+      → 场景来源：Tencent VOD Generated
+      → 上传 1-3 图 + Prompt + 费用确认
+      → SPZ 自动进入主视窗和摄影机观察窗
+      → 编辑人物、曲线速度、多摄影机与切镜
+      → 点击「渲染镜头输出」
     ├─ video      → Save Video 或下游视频输入
     └─ video_path → 启用 export_video 时直接得到预演 MP4
     ↓
 支持参考视频的 VS / Kling 工作流 → 最终视频
 ```
+
+独立的「混元 3D 世界生成」节点仍保留，适合批量工作流、资产复用和单独连接 Preview Splat。
 
 ## 素材引用语法（@N）
 
