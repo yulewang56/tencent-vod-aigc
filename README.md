@@ -193,6 +193,10 @@ cp tencent-vod-config.example.json tencent-vod-config.json
   Position / Look At / FOV / Roll 关键帧，并可在底部时间线上添加切镜点
 - 底部导演时间线按人物动作、空间轨迹、摄影机运镜、Look At 与 CUT 分层显示，使用秒数和语义
   片段作为默认视图；展开后的关键帧仍沿用原有 V3 track 数据，可继续精确编辑
+- 预演台提供最多 100 步场景级撤销/重做，覆盖路径点、对象、摄影机、CUT、背景变换和视觉样式；
+  macOS 使用 `Command+Z / Command+Shift+Z`，Windows / Linux 使用
+  `Ctrl+Z / Ctrl+Shift+Z`（也支持 `Ctrl+Y`）。焦点不在输入框时，`Delete / Backspace`
+  可删除当前路径点或摄影机关键帧；工具栏中的「快捷键」可随时查看操作提示
 - 旧版单摄影机 `{keyframes:[...]}`、v2 多摄影机和对象 `position/end/path` 会自动迁移为 V3，
   保存时仍同步兼容字段
 - 节点输出 `IMAGE` batch 和原生 `VIDEO`；`fps` 控制帧率，启用 `export_video` 后同时写出 MP4，

@@ -1305,6 +1305,8 @@ function openEditor(node) {
         safeJson(transformWidget?.value, DEFAULT_BACKGROUND_TRANSFORM)),
     },
     renderCachePath: String(renderCacheWidget?.value || ""),
+    backgroundLoadToken: 0,
+    backgroundOperationToken: 0,
     generation: {
       status: "idle",
       message: "",
@@ -1319,6 +1321,8 @@ function openEditor(node) {
     refreshTools: null,
     refreshInspectorTabs: null,
     refreshAppearanceToolbar: null,
+    refreshHistoryButtons: null,
+    history: null,
     rebuildScene: null,
     loadBackground: null,
   };
@@ -1361,6 +1365,7 @@ function openEditor(node) {
   const modeTabs = element("div", "vod-previs__mode-tabs");
   const headerActions = element("div", "vod-previs__header-actions");
   let runtime = null;
+  let history = null;
   let animationFrame = 0;
   let previousTime = performance.now();
   let closed = false;
@@ -1395,7 +1400,43 @@ function openEditor(node) {
     setWidgetValue(node, taskIdWidget, state.background.taskId);
     setWidgetValue(node, renderCacheWidget, state.renderCachePath);
   };
+  const applyHistoryAction = (direction) => {
+    if (!history || state.exporting) return false;
+    runtime?.cancelPathDrawing?.();
+    state.pathTool = null;
+    state.directorTool = "select";
+    const changed = direction === "undo" ? history.undo() : history.redo();
+    if (!changed) return false;
+    state.toolMessage = direction === "undo" ? "已撤销上一步编辑" : "已重做上一步编辑";
+    state.refreshTools?.();
+    state.refreshHistoryButtons?.();
+    return true;
+  };
   const onKeyDown = (event) => {
+    const key = event.key.toLowerCase();
+    const primaryModifier = event.metaKey || event.ctrlKey;
+    if (primaryModifier && key === "z" && !isTypingTarget(event.target)) {
+      event.preventDefault();
+      applyHistoryAction(event.shiftKey ? "redo" : "undo");
+      return;
+    }
+    if (event.ctrlKey && key === "y" && !isTypingTarget(event.target)) {
+      event.preventDefault();
+      applyHistoryAction("redo");
+      return;
+    }
+    if ((event.key === "Delete" || event.key === "Backspace")
+      && !isTypingTarget(event.target)
+      && !state.exporting
+      && deleteSelectedPrevisKey(state, runtime)) {
+      event.preventDefault();
+      history?.checkpoint();
+      state.toolMessage = state.selectedKind === "object"
+        ? "已删除所选路径点"
+        : "已删除所选摄影机关键帧";
+      state.refreshTools?.();
+      return;
+    }
     if (event.key === "Escape") {
       if (runtime?.cancelPathDrawing?.()) {
         state.pathTool = null;
@@ -1438,6 +1479,7 @@ function openEditor(node) {
     if (state.exporting) return;
     state.exporting = true;
     exportButton.disabled = true;
+    state.refreshHistoryButtons?.();
     exportStatus.textContent = "准备逐帧渲染…";
     try {
       persistNodeState();
@@ -1455,6 +1497,7 @@ function openEditor(node) {
     } finally {
       state.exporting = false;
       exportButton.disabled = false;
+      state.refreshHistoryButtons?.();
     }
   }, true);
   headerActions.append(exportButton, button("关闭", close));
@@ -1474,6 +1517,7 @@ function openEditor(node) {
   runtime = createThreeRuntime(mainHost, monitorHost, state, () => {
     state.refreshInspector?.();
     state.refreshTimeline?.();
+    history?.checkpoint();
   });
 
   const viewButtons = [];
@@ -1492,7 +1536,28 @@ function openEditor(node) {
     runtime.setGridVisible(state.showGrid);
   });
   gridButton.dataset.active = "true";
-  toolbar.append(gridButton, button("适配", () => runtime.fitView()), element("span", "vod-previs__toolbar-spacer"));
+  const isMac = /mac/i.test(navigator.userAgentData?.platform || navigator.platform || "");
+  const undoButton = button("↶ 撤销", () => applyHistoryAction("undo"));
+  undoButton.title = `${isMac ? "Command" : "Ctrl"} + Z`;
+  const redoButton = button("↷ 重做", () => applyHistoryAction("redo"));
+  redoButton.title = isMac ? "Command + Shift + Z" : "Ctrl + Shift + Z / Ctrl + Y";
+  const shortcutsButton = button("⌨ 快捷键", () => {
+    state.toolMessage = `${isMac ? "⌘Z" : "Ctrl+Z"} 撤销 · ${
+      isMac ? "⇧⌘Z" : "Ctrl+Shift+Z / Ctrl+Y"} 重做 · Delete 删除路径点/关键帧 · Esc 取消绘制`;
+    state.refreshTools?.();
+  });
+  toolbar.append(
+    gridButton,
+    button("适配", () => runtime.fitView()),
+    undoButton,
+    redoButton,
+    shortcutsButton,
+    element("span", "vod-previs__toolbar-spacer"),
+  );
+  state.refreshHistoryButtons = () => {
+    undoButton.disabled = state.exporting || !history?.canUndo();
+    redoButton.disabled = state.exporting || !history?.canRedo();
+  };
   const appearanceButtons = [];
   for (const [label, mode] of [
     ["材质", "director"],
@@ -1534,13 +1599,36 @@ function openEditor(node) {
     renderDirectorTools(toolRail, state, runtime);
   };
   state.rebuildScene = () => runtime.rebuild();
-  state.loadBackground = (path) => loadBackgroundAsset(path, runtime, viewport, state);
+  state.beginBackgroundOperation = () => {
+    state.backgroundOperationToken += 1;
+    state.backgroundLoadToken += 1;
+    return state.backgroundOperationToken;
+  };
+  state.isCurrentBackgroundOperation = (token) =>
+    token === state.backgroundOperationToken;
+  state.loadBackground = (path) => {
+    state.backgroundLoadToken += 1;
+    return loadBackgroundAsset(
+      path, runtime, viewport, state, state.backgroundLoadToken);
+  };
+  history = createPrevisHistory(
+    state,
+    (snapshot) => restorePrevisHistory(state, snapshot, runtime),
+    () => state.refreshHistoryButtons?.(),
+  );
+  state.history = history;
+  const checkpointDiscreteEdit = () => {
+    queueMicrotask(() => history?.checkpoint());
+  };
+  overlay.addEventListener("click", checkpointDiscreteEdit);
+  overlay.addEventListener("change", checkpointDiscreteEdit);
   state.refreshTabs();
   state.refreshInspectorTabs();
   state.refreshInspector();
   state.refreshTimeline();
   state.refreshTools();
   state.refreshAppearanceToolbar();
+  state.refreshHistoryButtons();
   runtime.fitView();
   state.loadBackground(state.background.path).catch((error) => {
     state.generation.status = "error";
@@ -1557,6 +1645,7 @@ function openEditor(node) {
       if (state.time >= 1) state.time %= 1;
       state.refreshTimeline?.();
     }
+    history.observe(now);
     if (!state.exporting) runtime.render(state.time);
     animationFrame = requestAnimationFrame(animate);
   };
@@ -2320,9 +2409,8 @@ function createThreeRuntime(mainHost, monitorHost, state, onManipulated) {
     fitView();
   }
 
-  async function addSplatBytes(bytes, fileName, onProgress) {
-    if (disposed) return;
-    clearAssets();
+  async function addSplatBytes(bytes, fileName, onProgress, isCurrent = () => true) {
+    if (disposed) return false;
     const mainSplat = new SplatMesh({
       fileBytes: bytes.slice(0),
       fileName,
@@ -2335,14 +2423,27 @@ function createThreeRuntime(mainHost, monitorHost, state, onManipulated) {
       lod: true,
       onProgress,
     });
+    const initialization = await Promise.allSettled(
+      [mainSplat.initialized, monitorSplat.initialized]);
+    const failed = initialization.find((result) => result.status === "rejected");
+    if (failed) {
+      mainSplat.dispose();
+      monitorSplat.dispose();
+      throw failed.reason;
+    }
+    if (disposed || !isCurrent()) {
+      mainSplat.dispose();
+      monitorSplat.dispose();
+      return false;
+    }
+    clearAssets();
     assetRoot.add(mainSplat);
     monitorAssetRoot.add(monitorSplat);
-    await Promise.all([mainSplat.initialized, monitorSplat.initialized]);
-    if (disposed) return;
     applyBackgroundTransform();
     mainSpark.setDirty();
     monitorSpark.setDirty();
     fitView();
+    return true;
   }
 
   function alignBackground() {
@@ -2892,7 +2993,8 @@ async function responseJson(response) {
   return payload;
 }
 
-async function submitWorldGeneration(state) {
+async function submitWorldGeneration(state, operationToken) {
+  const isCurrent = () => state.isCurrentBackgroundOperation?.(operationToken);
   const generation = state.generation;
   if (!generation.confirmed) throw new Error("请先确认这会创建真实的 Tencent VOD 付费任务");
   if (!generation.prompt.trim()) throw new Error("请填写场景描述");
@@ -2909,35 +3011,44 @@ async function submitWorldGeneration(state) {
     "/tencent-vod-aigc/previs/world-tasks",
     { method: "POST", headers: PREVIS_REQUEST_HEADER, body: form },
   ));
-  generation.status = "running";
-  generation.message = "混元 3D 世界生成中…";
-  state.refreshInspector?.();
+  if (isCurrent()) {
+    generation.status = "running";
+    generation.message = "混元 3D 世界生成中…";
+    state.refreshInspector?.();
+  }
   while (!state.disposed) {
     await new Promise((resolve) => setTimeout(resolve, 2500));
     const job = await responseJson(await fetch(
       `/tencent-vod-aigc/previs/world-tasks/${encodeURIComponent(created.job_id)}`,
     ));
-    generation.status = job.status;
-    generation.message = job.message || "处理中…";
+    if (isCurrent()) {
+      generation.status = job.status;
+      generation.message = job.message || "处理中…";
+    }
     if (job.status === "complete") {
+      if (!isCurrent()) return false;
       state.background.source = "Tencent VOD Generated";
       state.background.path = job.scene_path;
       state.background.taskId = job.task_id;
       invalidateRenderCache(state);
-      await state.loadBackground?.(job.scene_path);
+      const applied = await state.loadBackground?.(job.scene_path);
+      if (!applied || !isCurrent()) return false;
+      state.history?.checkpoint();
       state.refreshInspector?.();
-      return;
+      return true;
     }
     if (job.status === "error") {
-      state.refreshInspector?.();
+      if (isCurrent()) state.refreshInspector?.();
       throw new Error(job.message || "3D 世界生成失败");
     }
-    state.refreshInspector?.();
+    if (isCurrent()) state.refreshInspector?.();
   }
+  return false;
 }
 
-async function uploadLocalAsset(file, state) {
+async function uploadLocalAsset(file, state, operationToken) {
   if (!file) return;
+  const isCurrent = () => state.isCurrentBackgroundOperation?.(operationToken);
   state.generation.status = "submitting";
   state.generation.message = `正在上传本地场景：${file.name}`;
   state.refreshInspector?.();
@@ -2948,6 +3059,7 @@ async function uploadLocalAsset(file, state) {
       "/tencent-vod-aigc/previs/assets",
       { method: "POST", headers: PREVIS_REQUEST_HEADER, body: form },
     ));
+    if (!isCurrent()) return false;
     state.background.source = "Local Asset";
     state.background.path = uploaded.path;
     state.background.taskId = "";
@@ -2955,14 +3067,19 @@ async function uploadLocalAsset(file, state) {
     state.generation.status = "loading";
     state.generation.message = `正在加载本地场景：${uploaded.name}`;
     state.refreshInspector?.();
-    await state.loadBackground?.(uploaded.path);
+    const applied = await state.loadBackground?.(uploaded.path);
+    if (!applied || !isCurrent()) return false;
     state.generation.status = "complete";
     state.generation.message = `已加载本地场景：${uploaded.name}`;
+    state.history?.checkpoint();
+    return true;
   } catch (error) {
+    if (!isCurrent()) return false;
     state.generation.status = "error";
     state.generation.message = error.message;
   }
   state.refreshInspector?.();
+  return false;
 }
 
 function renderInspectorTabs(container, state, refresh) {
@@ -3122,12 +3239,17 @@ function renderSceneSourcePanel(container, state, runtime) {
     ["Blank", "Local Asset", "Tencent VOD Generated"],
     state.background.source,
     (value) => {
+      state.beginBackgroundOperation?.();
       state.background.source = value;
       invalidateRenderCache(state);
       if (value === "Blank") {
         state.background.path = "";
         state.background.taskId = "";
-        runtime.clearAssets();
+        state.loadBackground?.("").catch((error) => {
+          state.generation.status = "error";
+          state.generation.message = error.message;
+          state.refreshInspector?.();
+        });
       }
       state.refreshInspector?.();
     },
@@ -3139,7 +3261,10 @@ function renderSceneSourcePanel(container, state, runtime) {
     uploadInput.accept = ".glb,.gltf,.obj,.ply,.spz";
     uploadInput.addEventListener("change", () => {
       const file = uploadInput.files?.[0];
-      if (file) uploadLocalAsset(file, state);
+      if (file) {
+        const operationToken = state.beginBackgroundOperation?.();
+        uploadLocalAsset(file, state, operationToken);
+      }
     });
     upload.append(
       uploadInput,
@@ -3151,12 +3276,14 @@ function renderSceneSourcePanel(container, state, runtime) {
       "或填写 ComfyUI input / output / temp 内的资产路径",
       state.background.path,
       (value) => {
+        state.beginBackgroundOperation?.();
         state.background.path = value.trim();
         state.background.taskId = "";
         invalidateRenderCache(state);
       },
     ));
     details.appendChild(button("加载路径中的场景", async () => {
+      const operationToken = state.beginBackgroundOperation?.();
       try {
         if (!state.background.path.trim()) {
           throw new Error("请先选择本地 3D 文件，或填写允许访问的资产路径");
@@ -3164,10 +3291,11 @@ function renderSceneSourcePanel(container, state, runtime) {
         state.generation.status = "loading";
         state.generation.message = "正在加载本地场景…";
         state.refreshInspector?.();
-        await state.loadBackground?.(state.background.path);
+        const path = state.background.path;
+        const applied = await state.loadBackground?.(path);
+        if (!applied || !state.isCurrentBackgroundOperation?.(operationToken)) return;
         state.generation.status = "complete";
-        state.generation.message = `已加载本地场景：${
-          state.background.path.split(/[\\/]/).pop()}`;
+        state.generation.message = `已加载本地场景：${path.split(/[\\/]/).pop()}`;
       } catch (error) {
         state.generation.status = "error";
         state.generation.message = error.message;
@@ -3226,9 +3354,11 @@ function renderSceneSourcePanel(container, state, runtime) {
     );
     details.appendChild(confirm);
     const submit = button("确认并生成 3D 场景", async () => {
+      const operationToken = state.beginBackgroundOperation?.();
       try {
-        await submitWorldGeneration(state);
+        await submitWorldGeneration(state, operationToken);
       } catch (error) {
+        if (!state.isCurrentBackgroundOperation?.(operationToken)) return;
         state.generation.status = "error";
         state.generation.message = error.message;
         state.refreshInspector?.();
@@ -3775,10 +3905,11 @@ function initializeBezierHandles(track) {
   }
 }
 
-async function loadBackgroundAsset(path, runtime, viewport, state) {
+async function loadBackgroundAsset(path, runtime, viewport, state, loadToken) {
+  const isCurrent = () => state.backgroundLoadToken === loadToken;
   viewport.querySelectorAll(".vod-previs__asset-notice").forEach((notice) => notice.remove());
   runtime.clearAssets();
-  if (!path?.trim()) return;
+  if (!path?.trim()) return isCurrent();
   const cleanPath = path;
   const extension = cleanPath.includes(".") ? cleanPath.split(".").pop().toLowerCase() : "";
   if (!["glb", "gltf", "obj", "ply", "spz"].includes(extension)) {
@@ -3795,8 +3926,12 @@ async function loadBackgroundAsset(path, runtime, viewport, state) {
         throw new Error(detail || `HTTP ${response.status}`);
       }
       const bytes = await response.arrayBuffer();
+      if (!isCurrent()) {
+        notice.remove();
+        return false;
+      }
       notice.textContent = "正在解码 SPZ 并创建主视窗与观察窗渲染资源…";
-      await runtime.addSplatBytes(
+      const applied = await runtime.addSplatBytes(
         bytes,
         cleanPath.split(/[\\/]/).pop(),
         (event) => {
@@ -3804,14 +3939,35 @@ async function loadBackgroundAsset(path, runtime, viewport, state) {
           const progress = Math.round((event.loaded / event.total) * 100);
           notice.textContent = `正在加载 SPZ 场景… ${progress}%`;
         },
+        isCurrent,
       );
+      if (!applied || !isCurrent()) {
+        notice.remove();
+        return false;
+      }
     } else if (extension === "glb" || extension === "gltf") {
       const gltf = await new GLTFLoader().loadAsync(assetUrl);
+      if (!isCurrent()) {
+        disposeObjectTree(gltf.scene);
+        notice.remove();
+        return false;
+      }
       runtime.addAsset(gltf.scene);
     } else if (extension === "obj") {
-      runtime.addAsset(await new OBJLoader().loadAsync(assetUrl));
+      const object = await new OBJLoader().loadAsync(assetUrl);
+      if (!isCurrent()) {
+        disposeObjectTree(object);
+        notice.remove();
+        return false;
+      }
+      runtime.addAsset(object);
     } else {
       const geometry = await new PLYLoader().loadAsync(assetUrl);
+      if (!isCurrent()) {
+        geometry.dispose();
+        notice.remove();
+        return false;
+      }
       geometry.computeVertexNormals();
       const themeColor = getComputedStyle(document.documentElement)
         .getPropertyValue("--cp-border-strong")
@@ -3819,10 +3975,20 @@ async function loadBackgroundAsset(path, runtime, viewport, state) {
       const material = new THREE.MeshStandardMaterial({ color: themeColor, roughness: 0.8 });
       runtime.addAsset(new THREE.Mesh(geometry, material));
     }
+    if (!isCurrent()) {
+      notice.remove();
+      return false;
+    }
     state.background.path = path;
     runtime.setBackgroundTransform(state.background.transform);
     notice.remove();
+    state.history?.checkpoint();
+    return true;
   } catch (error) {
+    if (!isCurrent()) {
+      notice.remove();
+      return false;
+    }
     notice.textContent = `背景资产无法由浏览器加载：${error?.message || "路径不可访问"}`;
     throw error;
   }
@@ -3876,6 +4042,185 @@ async function exportPrevisFrames(runtime, state, width, height, onProgress) {
   }
 }
 
+function previsHistoryEntry(state) {
+  const snapshot = {
+    scene: structuredClone(state.scene),
+    cameraRig: structuredClone(state.cameraRig),
+    background: structuredClone(state.background),
+  };
+  return { snapshot, key: JSON.stringify(snapshot) };
+}
+
+function previsExportStateKey(state) {
+  const scene = structuredClone(state.scene);
+  if (scene.appearance) {
+    delete scene.appearance.preview_mode;
+    delete scene.appearance.preset;
+  }
+  return JSON.stringify({
+    scene,
+    cameraRig: state.cameraRig,
+    background: state.background,
+  });
+}
+
+function createPrevisHistory(state, restore, onChange) {
+  const undoStack = [];
+  const redoStack = [];
+  const maxEntries = 100;
+  let present = previsHistoryEntry(state);
+  let observedKey = present.key;
+  let dirtySince = 0;
+  let lastObservedAt = 0;
+
+  const notify = () => onChange?.();
+  const commit = (entry = previsHistoryEntry(state)) => {
+    if (entry.key === present.key) {
+      observedKey = entry.key;
+      dirtySince = 0;
+      return false;
+    }
+    undoStack.push(present);
+    if (undoStack.length > maxEntries) undoStack.shift();
+    present = entry;
+    redoStack.length = 0;
+    observedKey = entry.key;
+    dirtySince = 0;
+    notify();
+    return true;
+  };
+  const restoreEntry = (entry) => {
+    present = entry;
+    observedKey = entry.key;
+    dirtySince = 0;
+    restore(structuredClone(entry.snapshot));
+    notify();
+  };
+
+  return {
+    checkpoint() {
+      return commit();
+    },
+    observe(now) {
+      if (now - lastObservedAt < 120) return;
+      lastObservedAt = now;
+      const current = previsHistoryEntry(state);
+      if (current.key !== observedKey) {
+        observedKey = current.key;
+        dirtySince = now;
+        notify();
+      } else if (dirtySince && now - dirtySince >= 450) {
+        commit(current);
+      }
+    },
+    canUndo() {
+      return undoStack.length > 0 || previsHistoryEntry(state).key !== present.key;
+    },
+    canRedo() {
+      return redoStack.length > 0 && previsHistoryEntry(state).key === present.key;
+    },
+    undo() {
+      commit();
+      if (!undoStack.length) return false;
+      redoStack.push(present);
+      restoreEntry(undoStack.pop());
+      return true;
+    },
+    redo() {
+      const current = previsHistoryEntry(state);
+      if (current.key !== present.key) {
+        commit(current);
+        return false;
+      }
+      if (!redoStack.length) return false;
+      undoStack.push(present);
+      restoreEntry(redoStack.pop());
+      return true;
+    },
+  };
+}
+
+function restorePrevisHistory(state, snapshot, runtime) {
+  const previousBackgroundPath = state.background.path;
+  const previousExportState = previsExportStateKey(state);
+  const nextBackground = {
+    source: String(snapshot.background?.source || "Blank"),
+    path: String(snapshot.background?.path || ""),
+    taskId: String(snapshot.background?.taskId || ""),
+    transform: normalizeBackgroundTransform(snapshot.background?.transform),
+  };
+  const backgroundOperationChanged = state.background.source !== nextBackground.source
+    || state.background.path !== nextBackground.path
+    || state.background.taskId !== nextBackground.taskId;
+  if (backgroundOperationChanged) {
+    state.beginBackgroundOperation?.();
+  }
+  state.scene = normalizeScene(snapshot.scene);
+  state.cameraRig = normalizeCameraRig(snapshot.cameraRig);
+  state.background = nextBackground;
+  if (previousExportState !== previsExportStateKey(state)) state.renderCachePath = "";
+  state.selectedObjectId = state.scene.objects.some(
+    (item) => item.id === state.selectedObjectId)
+    ? state.selectedObjectId
+    : state.scene.objects[0]?.id || null;
+  state.selectedCameraId = state.cameraRig.cameras.some(
+    (camera) => camera.id === state.selectedCameraId)
+    ? state.selectedCameraId
+    : state.cameraRig.active_camera;
+  if (state.selectedKind === "object" && !state.selectedObjectId) state.selectedKind = "camera";
+  state.selectedPointIndex = clamp(
+    state.selectedPointIndex,
+    0,
+    Math.max(0, state.scene.objects.find(
+      (item) => item.id === state.selectedObjectId)?.motion_track.points.length - 1),
+  );
+  state.selectedKeyframe = clamp(
+    state.selectedKeyframe,
+    0,
+    Math.max(0, state.cameraRig.cameras.find(
+      (camera) => camera.id === state.selectedCameraId)?.keyframes.length - 1),
+  );
+  if (!state.cameraRig.cameras.some((camera) => camera.id === state.observationCameraId)) {
+    state.observationCameraId = state.cameraRig.active_camera;
+  }
+  runtime.rebuild();
+  runtime.setBackgroundTransform(state.background.transform);
+  runtime.applyAppearance();
+  if (previousBackgroundPath !== state.background.path
+    || (backgroundOperationChanged && state.background.path)) {
+    state.loadBackground?.(state.background.path).catch((error) => {
+      state.generation.status = "error";
+      state.generation.message = error.message;
+      state.refreshInspector?.();
+    });
+  }
+  state.refreshInspectorTabs?.();
+  state.refreshAppearanceToolbar?.();
+  refreshAll(state);
+}
+
+function deleteSelectedPrevisKey(state, runtime) {
+  if (state.selectedKind === "object") {
+    const item = state.scene.objects.find((entry) => entry.id === state.selectedObjectId);
+    if (!item || item.motion_track.points.length <= 2) return false;
+    item.motion_track.points.splice(state.selectedPointIndex, 1);
+    state.selectedPointIndex = clamp(
+      state.selectedPointIndex, 0, item.motion_track.points.length - 1);
+    syncObjectLegacy(item);
+  } else {
+    const camera = getSelectedCamera(state);
+    if (!camera || camera.keyframes.length <= 1) return false;
+    camera.keyframes.splice(state.selectedKeyframe, 1);
+    state.selectedKeyframe = clamp(
+      state.selectedKeyframe, 0, camera.keyframes.length - 1);
+    syncCameraTracks(camera);
+  }
+  invalidateRenderCache(state);
+  runtime.rebuild();
+  refreshAll(state);
+  return true;
+}
+
 function refreshAll(state) {
   state.refreshTabs?.();
   state.refreshInspector?.();
@@ -3896,14 +4241,21 @@ function resizeRenderer(renderer, camera, host) {
 
 function disposeChildren(root, disposeObject = false) {
   for (const child of [...root.children]) {
-    child.traverse((object) => {
-      object.geometry?.dispose?.();
-      if (Array.isArray(object.material)) object.material.forEach((material) => disposeMaterial(material));
-      else disposeMaterial(object.material);
-    });
+    disposeObjectTree(child);
     if (disposeObject && typeof child.dispose === "function") child.dispose();
     root.remove(child);
   }
+}
+
+function disposeObjectTree(root) {
+  root?.traverse?.((object) => {
+    object.geometry?.dispose?.();
+    if (Array.isArray(object.material)) {
+      object.material.forEach((material) => disposeMaterial(material));
+    } else {
+      disposeMaterial(object.material);
+    }
+  });
 }
 
 function disposeMaterial(material) {
