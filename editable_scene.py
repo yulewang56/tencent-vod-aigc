@@ -58,6 +58,8 @@ Coordinate system:
   report only tabletop, seat, or panel thickness as total height.
 - Do not include people, pictures of objects, reflections, text, or tiny clutter.
 - Use one axis-aligned or yaw-rotated box proxy per physical object.
+- Preserve the photographed spacing. Do not regularize repeated furniture into
+  an ideal grid unless the image actually shows equal spacing.
 - Mark hidden geometry as inferred. Do not invent decorative detail.
 - Keep every object inside or directly against the room bounds.
 - For door, window, and board objects, set wall to left/right/back/front.
@@ -68,7 +70,16 @@ Use these exact JSON fields without copying any preset scene dimensions:
 - room: width, depth, height, confidence (all numeric)
 - camera: position (3 numbers), target (3 numbers), fov_degrees
 - objects: array of objects containing name, category, position (3 numbers),
-  size (3 numbers), yaw_degrees, confidence, evidence, movable, and wall
+  size (3 numbers), yaw_degrees, confidence, evidence, movable, wall,
+  image_bbox, and floor_contact
+- image_bbox is [left, top, right, bottom] in primary-image normalized 0-1
+  coordinates and must tightly cover the visible extent of that instance
+- floor_contact is [x, y] in normalized 0-1 primary-image coordinates at the
+  physical floor contact beneath each table, chair, or other floor object
+- floor_contact must lie at or very near that instance's image_bbox bottom
+  edge. Never reuse one floor_contact.y for furniture in different depth rows.
+- window objects also include sill_height_m, the estimated physical distance
+  from the floor to the window's lower edge
 - category must be one of:
   board, door, window, table, chair, storage, appliance, furniture, prop, unknown
 - wall must be left/right/back/front for mounted objects and an empty string otherwise
@@ -78,6 +89,8 @@ Before replying, verify:
 - classroom chairs include seat, legs, and back in their full height
 - doors start at floor level and use plausible human-scale dimensions
 - wall fixtures are thin and share a consistent wall plane
+- repeated furniture preserves each photographed floor contact and gap instead
+  of being replaced by a synthetic evenly spaced grid
 - room and camera numbers were inferred from the image, not copied from this instruction
 
 Return only one valid JSON object with those fields and no Markdown.
@@ -135,9 +148,138 @@ def _vec3(value, field, minimum, maximum):
     ]
 
 
+def _normalized_point(value):
+    if not isinstance(value, list) or len(value) != 2:
+        return None
+    try:
+        point = [float(value[0]), float(value[1])]
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(component) and 0 <= component <= 1 for component in point):
+        return None
+    return point
+
+
+def _normalized_bbox(value):
+    if not isinstance(value, list) or len(value) != 4:
+        return None
+    try:
+        bbox = [float(component) for component in value]
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(component) and 0 <= component <= 1 for component in bbox):
+        return None
+    if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
+        return None
+    return bbox
+
+
+def _normalize3(value):
+    length = math.sqrt(sum(component * component for component in value))
+    if length < 1e-8:
+        return None
+    return [component / length for component in value]
+
+
+def _cross3(left, right):
+    return [
+        left[1] * right[2] - left[2] * right[1],
+        left[2] * right[0] - left[0] * right[2],
+        left[0] * right[1] - left[1] * right[0],
+    ]
+
+
+def _image_ray(point, camera, aspect_ratio):
+    forward = _normalize3([
+        camera["target"][index] - camera["position"][index] for index in range(3)
+    ])
+    if forward is None:
+        return None
+    right = _normalize3(_cross3([0, 1, 0], forward))
+    if right is None:
+        return None
+    up = _normalize3(_cross3(forward, right))
+    x_ndc = (point[0] - 0.5) * 2.0
+    y_ndc = (0.5 - point[1]) * 2.0
+    tangent = math.tan(math.radians(camera["fov_degrees"]) * 0.5)
+    direction = [
+        forward[index]
+        + right[index] * x_ndc * tangent * aspect_ratio
+        + up[index] * y_ndc * tangent
+        for index in range(3)
+    ]
+    return _normalize3(direction)
+
+
+def _ground_point_from_image(point, camera, aspect_ratio):
+    direction = _image_ray(point, camera, aspect_ratio)
+    if direction is None or direction[1] >= -1e-4:
+        return None
+    distance = -camera["position"][1] / direction[1]
+    if distance <= 0:
+        return None
+    return [
+        camera["position"][index] + direction[index] * distance
+        for index in range(3)
+    ]
+
+
+def _wall_point_from_image(point, wall, camera, width, depth, aspect_ratio):
+    direction = _image_ray(point, camera, aspect_ratio)
+    if direction is None:
+        return None
+    axis = 0 if wall in {"left", "right"} else 2
+    plane = (
+        (-width * 0.5 if wall == "left" else width * 0.5)
+        if axis == 0
+        else (-depth * 0.5 if wall == "front" else depth * 0.5)
+    )
+    if abs(direction[axis]) < 1e-4:
+        return None
+    distance = (plane - camera["position"][axis]) / direction[axis]
+    if distance <= 0:
+        return None
+    return [
+        camera["position"][index] + direction[index] * distance
+        for index in range(3)
+    ]
+
+
+def _image_floor_layout_point(point, width, depth):
+    """Bounded fallback when the estimated camera cannot support ray projection."""
+    return [
+        (point[0] - 0.5) * width * 0.7,
+        0.0,
+        (0.6 - point[1]) * depth * 0.75,
+    ]
+
+
+def _inset_bound(value, limit):
+    """Keep outliers inside while retaining their monotonic relative ordering."""
+    if limit <= 0:
+        return 0.0
+    inset = min(limit, min(0.05, max(0.005, limit * 0.01)))
+    threshold = limit - inset
+    if -threshold <= value <= threshold:
+        return value
+    excess = abs(value) - threshold
+    bounded = threshold + inset * (1.0 - math.exp(-excess / inset))
+    return math.copysign(bounded, value)
+
+
 def _safe_name(value, fallback):
     name = " ".join(str(value or fallback).split())
     return name[:80] or fallback
+
+
+def _rotated_footprint(size, yaw_degrees):
+    yaw_radians = math.radians(yaw_degrees)
+    return (
+        abs(math.cos(yaw_radians)) * size[0] * 0.5
+        + abs(math.sin(yaw_radians)) * size[2] * 0.5,
+        abs(math.sin(yaw_radians)) * size[0] * 0.5
+        + abs(math.cos(yaw_radians)) * size[2] * 0.5,
+    )
 
 
 def _category(value):
@@ -231,7 +373,45 @@ def _interaction_anchor(category, position, size):
     return None
 
 
-def normalize_reconstruction_layout(raw, known_room_width_m=0.0, max_objects=36):
+def _separate_furniture_pairs(objects, depth, warnings):
+    tables = [item for item in objects if item["category"] == "table"]
+    for chair in (item for item in objects if item["category"] == "chair"):
+        if not tables:
+            return
+        table = min(
+            tables,
+            key=lambda item: math.hypot(
+                chair["position"][0] - item["position"][0],
+                chair["position"][2] - item["position"][2],
+            ),
+        )
+        distance = math.hypot(
+            chair["position"][0] - table["position"][0],
+            chair["position"][2] - table["position"][2],
+        )
+        _, chair_footprint_z = _rotated_footprint(
+            chair["size"], chair["yaw_degrees"])
+        _, table_footprint_z = _rotated_footprint(
+            table["size"], table["yaw_degrees"])
+        minimum_gap = chair_footprint_z + table_footprint_z + 0.12
+        if distance >= minimum_gap * 0.45:
+            continue
+        chair_bottom = (
+            chair["image_bbox"][3] if chair.get("image_bbox") is not None else 0.0)
+        table_bottom = (
+            table["image_bbox"][3] if table.get("image_bbox") is not None else 0.0)
+        direction = -1.0 if chair_bottom > table_bottom + 0.03 else 1.0
+        candidate = table["position"][2] + direction * minimum_gap
+        limit = max(0.0, depth * 0.5 - chair_footprint_z)
+        if not -limit <= candidate <= limit:
+            candidate = table["position"][2] - direction * minimum_gap
+        chair["position"][2] = min(max(candidate, -limit), limit)
+        chair["projection_source"] = "image_contact_pair_offset"
+        warnings.append(f"{chair['name']} 与配对桌子重叠，已按座椅净距分离")
+
+
+def normalize_reconstruction_layout(raw, known_room_width_m=0.0, max_objects=36,
+                                    image_aspect_ratio=1.0):
     """Validate model output and return a bounded, metric scene description."""
     if not isinstance(raw, dict):
         raise ValueError("场景布局必须是 JSON 对象")
@@ -250,6 +430,50 @@ def normalize_reconstruction_layout(raw, known_room_width_m=0.0, max_objects=36)
         raise ValueError("按已知房间宽度换算后，房间高度超出 1.8-20 米")
 
     warnings = []
+    camera = raw.get("camera") if isinstance(raw.get("camera"), dict) else {}
+    try:
+        if "position" in camera and "target" in camera:
+            camera_position = [
+                value * scale for value in _vec3(
+                    camera["position"], "camera.position", -500, 500)
+            ]
+            camera_target = [
+                value * scale for value in _vec3(
+                    camera["target"], "camera.target", -500, 500)
+            ]
+        else:
+            camera_position = [0, max(1.6, height * 0.55), -depth * 0.8]
+            camera_target = [0, min(1.2, height * 0.4), 0]
+        camera_fov = _number(
+            camera.get("fov_degrees", 55), "camera.fov_degrees", 15, 100)
+    except ValueError as error:
+        warnings.append(f"{error}，已使用默认参考机位")
+        camera_position = [0, max(1.6, height * 0.55), -depth * 0.8]
+        camera_target = [0, min(1.2, height * 0.4), 0]
+        camera_fov = 55.0
+    normalized_camera = {
+        "position": camera_position,
+        "target": camera_target,
+        "fov_degrees": camera_fov,
+    }
+    if (
+        abs(camera_position[0]) >= width * 0.45
+        or abs(camera_target[0]) >= width * 0.45
+        or not 0.8 <= camera_position[1] <= min(3.0, height)
+    ):
+        warnings.append("参考相机位于房间边界或高度不可靠，已改用居中参考机位")
+        normalized_camera = {
+            "position": [0, min(max(1.6, height * 0.5), 2.0), -depth * 0.8],
+            "target": [0, min(1.2, height * 0.4), 0],
+            "fov_degrees": camera_fov,
+        }
+    try:
+        aspect_ratio = float(image_aspect_ratio)
+    except (TypeError, ValueError):
+        aspect_ratio = 1.0
+    if not math.isfinite(aspect_ratio) or aspect_ratio <= 0:
+        aspect_ratio = 1.0
+
     raw_objects = raw.get("objects")
     if not isinstance(raw_objects, list):
         raise ValueError("场景布局缺少 objects 数组")
@@ -274,35 +498,96 @@ def normalize_reconstruction_layout(raw, known_room_width_m=0.0, max_objects=36)
         position = [component * scale for component in position]
         size = [component * scale for component in size]
         category = _category(item.get("category"))
+        image_bbox = _normalized_bbox(item.get("image_bbox"))
+        floor_contact = _normalized_point(item.get("floor_contact"))
+        if image_bbox is not None:
+            bbox_contact = [(image_bbox[0] + image_bbox[2]) * 0.5, image_bbox[3]]
+            if (
+                floor_contact is None
+                or floor_contact[0] < image_bbox[0] - 0.08
+                or floor_contact[0] > image_bbox[2] + 0.08
+                or abs(floor_contact[1] - image_bbox[3]) > 0.1
+            ):
+                floor_contact = bbox_contact
         evidence = str(item.get("evidence") or "inferred").strip().lower()
         if evidence not in _EVIDENCE_VALUES:
             evidence = "inferred"
         name = _safe_name(item.get("name"), f"对象 {index + 1}")
-        original = list(position)
         size[0] = min(size[0], width)
         size[1] = min(size[1], height * 1.5)
         size[2] = min(size[2], depth)
         _apply_category_priors(name, category, position, size, height, warnings)
-        position[1] = min(max(position[1], 0.0), max(0.0, height - size[1]))
         normalized_yaw = ((yaw + 180.0) % 360.0) - 180.0
         wall = str(item.get("wall") or "").strip().lower()
+        projection_used = False
         if category in _MOUNTED_CATEGORIES:
             if wall not in _WALL_VALUES:
                 wall = _nearest_wall(position, width, depth)
                 warnings.append(f"{name} 缺少可靠墙面标记，已吸附到 {wall} 墙")
+            wall_anchor = (
+                [(image_bbox[0] + image_bbox[2]) * 0.5, image_bbox[3]]
+                if image_bbox is not None else None
+            )
+            projected_wall_point = (
+                _wall_point_from_image(
+                    wall_anchor, wall, normalized_camera, width, depth, aspect_ratio)
+                if wall_anchor is not None else None
+            )
+            if projected_wall_point is not None:
+                position = projected_wall_point
+                projection_used = True
             _attach_to_wall(wall, position, size, width, depth)
             normalized_yaw = 0.0
+            if category == "door":
+                position[1] = 0.0
+            elif category == "window":
+                raw_sill = item.get("sill_height_m")
+                try:
+                    raw_sill_height = float(raw_sill) * scale
+                except (TypeError, ValueError):
+                    raw_sill_height = float("nan")
+                projected_sill_height = position[1] if projection_used else float("nan")
+                sill_height = (
+                    projected_sill_height
+                    if math.isfinite(projected_sill_height)
+                    and 0.45 <= projected_sill_height <= 1.5
+                    else raw_sill_height
+                )
+                max_sill = max(0.0, height - size[1])
+                if not math.isfinite(sill_height) or not 0.45 <= sill_height <= 1.5:
+                    sill_height = 0.9
+                    warnings.append(f"{name} 的窗台高度不可靠，已使用 0.9m 教室先验")
+                position[1] = min(max(sill_height, 0.45), max_sill)
+            elif category == "board":
+                upper = max(0.0, height - size[1])
+                position[1] = min(max(position[1], min(0.7, upper)), upper)
         else:
             wall = ""
-        yaw_radians = math.radians(normalized_yaw)
-        footprint_x = (
-            abs(math.cos(yaw_radians)) * size[0] * 0.5
-            + abs(math.sin(yaw_radians)) * size[2] * 0.5
-        )
-        footprint_z = (
-            abs(math.sin(yaw_radians)) * size[0] * 0.5
-            + abs(math.cos(yaw_radians)) * size[2] * 0.5
-        )
+            footprint_x, footprint_z = _rotated_footprint(size, normalized_yaw)
+            max_center_x = max(0.0, width * 0.5 - footprint_x)
+            max_center_z = max(0.0, depth * 0.5 - footprint_z)
+            projected_ground = (
+                _ground_point_from_image(floor_contact, normalized_camera, aspect_ratio)
+                if floor_contact is not None else None
+            )
+            if floor_contact is not None:
+                image_layout = (
+                    projected_ground
+                    if projected_ground is not None
+                    and abs(projected_ground[0]) <= width * 0.5
+                    and abs(projected_ground[2]) <= depth * 0.5
+                    else _image_floor_layout_point(floor_contact, width, depth)
+                )
+                bounded_model_x = _inset_bound(position[0], max_center_x)
+                bounded_model_z = _inset_bound(position[2], max_center_z)
+                bounded_image_x = _inset_bound(image_layout[0], max_center_x)
+                bounded_image_z = _inset_bound(image_layout[2], max_center_z)
+                position[0] = bounded_model_x * 0.35 + bounded_image_x * 0.65
+                position[2] = bounded_model_z * 0.35 + bounded_image_z * 0.65
+                projection_used = True
+            position[1] = min(max(position[1], 0.0), max(0.0, height - size[1]))
+        pre_boundary_position = list(position)
+        footprint_x, footprint_z = _rotated_footprint(size, normalized_yaw)
         footprint_scale = min(
             1.0,
             width * 0.5 / max(footprint_x, 0.001),
@@ -320,7 +605,7 @@ def normalize_reconstruction_layout(raw, known_room_width_m=0.0, max_objects=36)
             max_z = max(0.0, depth * 0.5 - footprint_z)
             position[0] = min(max(position[0], -max_x), max_x)
             position[2] = min(max(position[2], -max_z), max_z)
-        if position != original:
+        if position != pre_boundary_position:
             warnings.append(
                 f"{name} 超出房间边界，已约束")
         color = str(item.get("color") or "")
@@ -332,6 +617,9 @@ def normalize_reconstruction_layout(raw, known_room_width_m=0.0, max_objects=36)
             "name": name,
             "category": category,
             "wall": wall,
+            "image_bbox": image_bbox,
+            "floor_contact": floor_contact,
+            "projection_source": "image_contact" if projection_used else "model_3d",
             "primitive": "box",
             "position": position,
             "size": size,
@@ -346,30 +634,34 @@ def normalize_reconstruction_layout(raw, known_room_width_m=0.0, max_objects=36)
         anchor = _interaction_anchor(category, position, size)
         if anchor:
             entity["interaction_anchor"] = anchor
+        duplicate_observation = next((
+            existing for existing in objects
+            if existing["category"] == category
+            and (
+                image_bbox is not None
+                and existing.get("image_bbox") == image_bbox
+                and (
+                    category not in _MOUNTED_CATEGORIES
+                    or existing.get("wall") == wall
+                )
+                or floor_contact is not None
+                and existing.get("floor_contact") is not None
+                and abs(existing["floor_contact"][0] - floor_contact[0]) < 0.015
+                and abs(existing["floor_contact"][1] - floor_contact[1]) < 0.015
+            )
+        ), None)
+        if duplicate_observation is not None:
+            warnings.append(f"{name} 与 {duplicate_observation['name']} 使用重复图像区域，已去重")
+            continue
         objects.append(entity)
 
-    camera = raw.get("camera") if isinstance(raw.get("camera"), dict) else {}
-    try:
-        if "position" in camera and "target" in camera:
-            camera_position = [
-                value * scale for value in _vec3(
-                    camera["position"], "camera.position", -500, 500)
-            ]
-            camera_target = [
-                value * scale for value in _vec3(
-                    camera["target"], "camera.target", -500, 500)
-            ]
-        else:
-            camera_position = [0, max(1.6, height * 0.55), -depth * 0.8]
-            camera_target = [0, min(1.2, height * 0.4), 0]
-        camera_fov = _number(
-            camera.get("fov_degrees", 55), "camera.fov_degrees", 15, 100)
-    except ValueError as error:
-        warnings.append(f"{error}，已使用默认参考机位")
-        camera_position = [0, max(1.6, height * 0.55), -depth * 0.8]
-        camera_target = [0, min(1.2, height * 0.4), 0]
-        camera_fov = 55.0
-
+    _separate_furniture_pairs(objects, depth, warnings)
+    for entity in objects:
+        entity.pop("interaction_anchor", None)
+        anchor = _interaction_anchor(
+            entity["category"], entity["position"], entity["size"])
+        if anchor:
+            entity["interaction_anchor"] = anchor
     return {
         "room": {
             "width": width,
@@ -378,11 +670,7 @@ def normalize_reconstruction_layout(raw, known_room_width_m=0.0, max_objects=36)
             "confidence": confidence,
             "scale_source": "known_room_width" if known_room_width_m > 0 else "visual_estimate",
         },
-        "camera": {
-            "position": camera_position,
-            "target": camera_target,
-            "fov_degrees": camera_fov,
-        },
+        "camera": normalized_camera,
         "objects": objects,
         "warnings": warnings,
     }
@@ -454,6 +742,9 @@ def build_scene_documents(layout, model, request_id, image_hashes):
                 "movable": entity["movable"],
                 "collider": entity["collider"],
                 "wall": entity.get("wall", ""),
+                "image_bbox": entity.get("image_bbox"),
+                "floor_contact": entity.get("floor_contact"),
+                "projection_source": entity.get("projection_source", "model_3d"),
             },
         })
     scene = {

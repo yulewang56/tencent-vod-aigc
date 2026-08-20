@@ -23,6 +23,7 @@ import json
 import os
 import re
 import threading
+import time
 import urllib.parse
 import urllib.request
 import uuid
@@ -287,14 +288,20 @@ def _image_tensor_to_base64(image_tensor, frame_index: int = 0) -> str:
     return base64.b64encode(data).decode("ascii")
 
 
-def _paths_to_image_tensor(paths):
+def _paths_to_image_tensor(paths, resize_to_first=False):
     """把本地图片列表转成 ComfyUI IMAGE 张量（B,H,W,C float 0-1）；失败返回 None 不阻塞主流程。"""
     try:
         import torch
         frames = []
+        target_size = None
         for p in paths:
             with Image.open(p) as im:
-                arr = np.asarray(im.convert("RGB"), dtype=np.float32) / 255.0
+                rgb = im.convert("RGB")
+                if target_size is None:
+                    target_size = rgb.size
+                elif resize_to_first and rgb.size != target_size:
+                    rgb = rgb.resize(target_size, Image.Resampling.LANCZOS)
+                arr = np.asarray(rgb, dtype=np.float32) / 255.0
             frames.append(torch.from_numpy(arr))
         return torch.stack(frames) if frames else None
     except Exception:
@@ -336,7 +343,10 @@ def _next_previs_video_path(filename_prefix):
 _PREVIS_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 _PREVIS_JOB_LOCK = threading.Lock()
 _PREVIS_WORLD_JOBS = {}
+_PREVIS_RECONSTRUCTION_JOBS = {}
 _PREVIS_RENDER_SESSIONS = {}
+_MAX_PREVIS_RECONSTRUCTION_JOBS = 16
+_PREVIS_RECONSTRUCTION_JOB_TTL = 3600
 _PREVIS_BROWSER_ASSET_EXTS = {".glb", ".gltf", ".obj", ".ply", ".spz"}
 _MAX_PREVIS_ASSET_BYTES = 1024 * 1024 * 1024
 
@@ -379,8 +389,51 @@ def _previs_job_snapshot(job_id):
         return dict(job) if job is not None else None
 
 
+def _previs_update_reconstruction_job(job_id, **values):
+    with _PREVIS_JOB_LOCK:
+        job = _PREVIS_RECONSTRUCTION_JOBS.get(job_id)
+        if job is not None:
+            job.update(values)
+            job["_updated_at"] = time.time()
+        _previs_prune_reconstruction_jobs_locked()
+
+
+def _previs_reconstruction_job_snapshot(job_id):
+    with _PREVIS_JOB_LOCK:
+        _previs_prune_reconstruction_jobs_locked()
+        job = _PREVIS_RECONSTRUCTION_JOBS.get(job_id)
+        return (
+            {key: value for key, value in job.items() if not key.startswith("_")}
+            if job is not None else None
+        )
+
+
+def _previs_prune_reconstruction_jobs_locked(now=None):
+    current_time = time.time() if now is None else now
+    terminal = []
+    for job_id, job in list(_PREVIS_RECONSTRUCTION_JOBS.items()):
+        if job.get("status") not in {"complete", "error"}:
+            continue
+        updated_at = float(job.get("_updated_at", current_time))
+        if current_time - updated_at > _PREVIS_RECONSTRUCTION_JOB_TTL:
+            _PREVIS_RECONSTRUCTION_JOBS.pop(job_id, None)
+            continue
+        terminal.append((updated_at, job_id))
+    overflow = len(_PREVIS_RECONSTRUCTION_JOBS) - _MAX_PREVIS_RECONSTRUCTION_JOBS
+    if overflow > 0:
+        for _, job_id in sorted(terminal)[:overflow]:
+            _PREVIS_RECONSTRUCTION_JOBS.pop(job_id, None)
+
+
 def _previs_cleanup_uploads(paths, directory):
-    for path in paths:
+    candidates = list(paths)
+    try:
+        candidates.extend(
+            os.path.join(directory, name) for name in os.listdir(directory)
+        )
+    except OSError:
+        pass
+    for path in dict.fromkeys(candidates):
         try:
             if os.path.isfile(path):
                 os.remove(path)
@@ -442,6 +495,44 @@ def _previs_run_world_job(job_id, prompt, image_paths, upload_dir, options):
         )
     except Exception as error:
         _previs_update_job(job_id, status="error", message=str(error))
+    finally:
+        _previs_cleanup_uploads(image_paths, upload_dir)
+
+
+def _previs_run_reconstruction_job(job_id, image_paths, upload_dir, options):
+    node = TencentVODImageToEditable3DScene()
+    node._status_callback = lambda text: _previs_update_reconstruction_job(
+        job_id, status="running", message=text)
+    try:
+        images = _paths_to_image_tensor(image_paths, resize_to_first=True)
+        if images is None:
+            raise RuntimeError("无法把参考图转换为场景重建输入")
+        result = node.reconstruct(
+            images,
+            options["scene_type"],
+            options["known_room_width_m"],
+            options["max_objects"],
+            "Enabled",
+            additional_guidance=options.get("additional_guidance", ""),
+            model=options.get("model", "hunyuan-vision-1.5-instruct"),
+            request_timeout=options.get("request_timeout", 240),
+            filename=options.get("filename", "director_reconstruction"),
+        )
+        _previs_update_reconstruction_job(
+            job_id,
+            status="complete",
+            message="可编辑白模已生成，可直接载入导演台",
+            scene_path=result[1],
+            scene_json=result[2],
+            camera_json=result[3],
+            manifest_path=result[5],
+            collision_path=os.path.join(
+                os.path.dirname(result[5]), "collision.glb"),
+            report=result[7],
+        )
+    except Exception as error:
+        _previs_update_reconstruction_job(
+            job_id, status="error", message=str(error))
     finally:
         _previs_cleanup_uploads(image_paths, upload_dir)
 
@@ -1694,6 +1785,125 @@ def _register_http_routes():
             return web.json_response({"ok": False, "error": "任务不存在"}, status=404)
         return web.json_response({"ok": True, **job})
 
+    async def previs_reconstruction_create(request):
+        if not previs_mutation_allowed(request):
+            return previs_forbidden()
+        if not request.content_type.startswith("multipart/"):
+            return web.json_response(
+                {"ok": False, "error": "白模重建请求必须使用 multipart/form-data"},
+                status=400)
+        job_id = uuid.uuid4().hex
+        temp_getter = getattr(folder_paths, "get_temp_directory", None)
+        temp_root = temp_getter() if temp_getter is not None else folder_paths.get_input_directory()
+        upload_dir = _previs_root("previs_reconstruction_uploads", job_id, temp_root)
+        os.makedirs(upload_dir, exist_ok=False)
+        fields = {}
+        image_paths = []
+        worker_started = False
+        try:
+            reader = await request.multipart()
+            async for part in reader:
+                if part.name != "image":
+                    fields[part.name] = (await part.text()).strip()
+                    continue
+                if len(image_paths) >= 3:
+                    raise ValueError("可编辑白模参考图最多 3 张")
+                data = bytearray()
+                while True:
+                    chunk = await part.read_chunk()
+                    if not chunk:
+                        break
+                    data.extend(chunk)
+                    if len(data) > _MAX_IMAGE_BYTES:
+                        raise ValueError("单张参考图超过 30MB 上限")
+                try:
+                    with Image.open(io.BytesIO(data)) as source:
+                        source.verify()
+                    with Image.open(io.BytesIO(data)) as source:
+                        compressed = _compress_image(source)
+                except (OSError, ValueError) as error:
+                    raise ValueError(f"参考图不是有效图片: {error}") from error
+                path = os.path.join(upload_dir, f"reference_{len(image_paths) + 1}.jpg")
+                with open(path, "wb") as handle:
+                    handle.write(compressed)
+                image_paths.append(path)
+            if not image_paths:
+                raise ValueError("请上传 1-3 张同一空间的参考图")
+            if fields.get("confirmed") != "true":
+                raise ValueError("提交前必须确认会调用腾讯混元视觉并可能产生费用")
+            scene_type = fields.get("scene_type", "室内通用")
+            scene_types = {
+                "室内通用", "教室", "办公室", "客厅",
+                "卧室", "展厅", "餐厅", "摄影棚",
+            }
+            if scene_type not in scene_types:
+                raise ValueError("scene_type 无效")
+            known_room_width_m = float(fields.get("known_room_width_m", 0) or 0)
+            if not 0 <= known_room_width_m <= 100:
+                raise ValueError("known_room_width_m 必须在 0-100 之间")
+            max_objects = int(fields.get("max_objects", 36) or 36)
+            if not 1 <= max_objects <= 56:
+                raise ValueError("max_objects 必须在 1-56 之间")
+            request_timeout = int(fields.get("request_timeout", 240) or 240)
+            if not 60 <= request_timeout <= 600:
+                raise ValueError("request_timeout 必须在 60-600 秒之间")
+            model = fields.get("model", "hunyuan-vision-1.5-instruct")
+            if model not in {
+                "hunyuan-vision-1.5-instruct",
+                "hunyuan-t1-vision-20250916",
+            }:
+                raise ValueError("model 无效")
+            options = {
+                "scene_type": scene_type,
+                "known_room_width_m": known_room_width_m,
+                "max_objects": max_objects,
+                "additional_guidance": fields.get("additional_guidance", ""),
+                "model": model,
+                "request_timeout": request_timeout,
+                "filename": fields.get("filename", "director_reconstruction"),
+            }
+            with _PREVIS_JOB_LOCK:
+                _previs_prune_reconstruction_jobs_locked()
+                _PREVIS_RECONSTRUCTION_JOBS[job_id] = {
+                    "job_id": job_id,
+                    "status": "queued",
+                    "message": "等待混元视觉分析图片结构…",
+                    "scene_path": "",
+                    "manifest_path": "",
+                    "collision_path": "",
+                    "report": "",
+                    "_updated_at": time.time(),
+                }
+            worker = threading.Thread(
+                target=_previs_run_reconstruction_job,
+                args=(job_id, image_paths, upload_dir, options),
+                name=f"vod-previs-reconstruction-{job_id[:8]}",
+                daemon=True,
+            )
+            worker.start()
+            worker_started = True
+            return web.json_response({"ok": True, "job_id": job_id}, status=202)
+        except (TypeError, ValueError) as error:
+            return web.json_response({"ok": False, "error": str(error)}, status=400)
+        except (OSError, RuntimeError):
+            with _PREVIS_JOB_LOCK:
+                _PREVIS_RECONSTRUCTION_JOBS.pop(job_id, None)
+            return web.json_response(
+                {"ok": False, "error": "创建白模重建任务失败，请检查服务器日志"},
+                status=500)
+        finally:
+            if not worker_started:
+                _previs_cleanup_uploads(image_paths, upload_dir)
+
+    async def previs_reconstruction_status(request):
+        job_id = request.match_info.get("job_id", "")
+        if not _PREVIS_ID_RE.fullmatch(job_id):
+            return web.json_response({"ok": False, "error": "无效的任务 ID"}, status=400)
+        job = _previs_reconstruction_job_snapshot(job_id)
+        if job is None:
+            return web.json_response({"ok": False, "error": "任务不存在"}, status=404)
+        return web.json_response({"ok": True, **job})
+
     async def previs_render_create(request):
         if not previs_mutation_allowed(request):
             return previs_forbidden()
@@ -1831,6 +2041,10 @@ def _register_http_routes():
     routes.post("/tencent-vod-aigc/previs/assets")(previs_asset_upload)
     routes.post("/tencent-vod-aigc/previs/world-tasks")(previs_world_create)
     routes.get("/tencent-vod-aigc/previs/world-tasks/{job_id}")(previs_world_status)
+    routes.post("/tencent-vod-aigc/previs/reconstruction-tasks")(
+        previs_reconstruction_create)
+    routes.get("/tencent-vod-aigc/previs/reconstruction-tasks/{job_id}")(
+        previs_reconstruction_status)
     routes.post("/tencent-vod-aigc/previs/renders")(previs_render_create)
     routes.put("/tencent-vod-aigc/previs/renders/{render_id}/frames/{index}")(
         previs_render_frame)
@@ -2926,6 +3140,7 @@ class TencentVODImageToEditable3DScene:
             _extract_json_object(raw_content),
             known_room_width_m=float(known_room_width_m),
             max_objects=int(max_objects),
+            image_aspect_ratio=float(image.shape[2]) / float(image.shape[1]),
         )
         request_id = str(response.get("RequestId") or response.get("Id") or "")
         scene, camera, manifest = _build_scene_documents(
@@ -2942,8 +3157,13 @@ class TencentVODImageToEditable3DScene:
         camera_json = json.dumps(camera, ensure_ascii=False, indent=2)
         manifest_json = json.dumps(manifest, ensure_ascii=False, indent=2)
         warnings = manifest["warnings"]
+        image_aligned_count = sum(
+            1 for entity in manifest["entities"]
+            if str(entity.get("projection_source", "")).startswith("image_contact")
+        )
         report_lines = [
             f"已生成 {len(manifest['entities'])} 个独立白模对象",
+            f"主图约束：{image_aligned_count} 个对象按图像落地点/墙面校准",
             f"房间估计：{manifest['room']['width']:.2f}m × "
             f"{manifest['room']['depth']:.2f}m × {manifest['room']['height']:.2f}m",
             f"尺度来源：{manifest['room']['scale_source']}",
@@ -2951,7 +3171,9 @@ class TencentVODImageToEditable3DScene:
             "这是影视预演级包围盒重建，不是测量级扫描或高精度表面 Mesh",
         ]
         if warnings:
-            report_lines.append("修正/警告：" + "；".join(warnings))
+            shown_warnings = warnings[:12]
+            suffix = f"；另有 {len(warnings) - 12} 项" if len(warnings) > 12 else ""
+            report_lines.append("修正/警告：" + "；".join(shown_warnings) + suffix)
         _set_status(self, f"完成（{len(manifest['entities'])} 个可编辑对象）")
         return (
             _file_3d_value(paths["scene"]),
@@ -2996,7 +3218,9 @@ class TencentVOD3DPrevis:
             "filename_prefix": ("STRING", {
                 "default": "previs",
                 "tooltip": "导出 MP4 文件名前缀"}),
-            "scene_source": (["Blank", "Local Asset", "Tencent VOD Generated"], {
+            "scene_source": ([
+                "Blank", "Local Asset", "Tencent VOD Generated", "Image Reconstruction",
+            ], {
                 "default": "Blank",
                 "tooltip": "预演编辑器中的场景来源；云端生成只会在明确确认后提交"}),
             "background_transform": ("STRING", {

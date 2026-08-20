@@ -1352,6 +1352,18 @@ function openEditor(node) {
       confirmed: false,
       images: [null, null, null],
     },
+    reconstruction: {
+      status: "idle",
+      message: "",
+      sceneType: "室内通用",
+      knownRoomWidth: 0,
+      maxObjects: 36,
+      additionalGuidance: "",
+      model: "hunyuan-vision-1.5-instruct",
+      confirmed: false,
+      preserveProduction: true,
+      images: [null, null, null],
+    },
     refreshInspector: null,
     refreshTimeline: null,
     refreshTabs: null,
@@ -3266,6 +3278,100 @@ async function submitWorldGeneration(state, operationToken) {
   return false;
 }
 
+async function submitImageReconstruction(state, runtime, operationToken) {
+  const isCurrent = () => state.isCurrentBackgroundOperation?.(operationToken);
+  const reconstruction = state.reconstruction;
+  const images = reconstruction.images.filter(Boolean);
+  if (!reconstruction.confirmed) {
+    throw new Error("请先确认会调用腾讯混元视觉并可能产生费用");
+  }
+  if (!images.length) throw new Error("请至少上传一张参考图");
+  reconstruction.status = "submitting";
+  reconstruction.message = "正在上传参考图并创建可编辑白模任务…";
+  state.refreshInspector?.();
+  const form = new FormData();
+  form.set("scene_type", reconstruction.sceneType);
+  form.set("known_room_width_m", String(reconstruction.knownRoomWidth));
+  form.set("max_objects", String(reconstruction.maxObjects));
+  form.set("additional_guidance", reconstruction.additionalGuidance.trim());
+  form.set("model", reconstruction.model);
+  form.set("request_timeout", "240");
+  form.set("confirmed", "true");
+  images.forEach((file) => form.append("image", file, file.name));
+  const created = await responseJson(await fetch(
+    "/tencent-vod-aigc/previs/reconstruction-tasks",
+    { method: "POST", headers: PREVIS_REQUEST_HEADER, body: form },
+  ));
+  if (isCurrent()) {
+    reconstruction.status = "running";
+    reconstruction.message = "混元视觉正在识别实例、落地点、墙面和物理尺度…";
+    state.refreshInspector?.();
+  }
+  while (!state.disposed) {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    const job = await responseJson(await fetch(
+      `/tencent-vod-aigc/previs/reconstruction-tasks/${encodeURIComponent(created.job_id)}`,
+    ));
+    if (isCurrent()) {
+      reconstruction.status = job.status;
+      reconstruction.message = job.message || "处理中…";
+    }
+    if (job.status === "complete") {
+      if (!isCurrent()) return false;
+      let reconstructedScene;
+      let reconstructedCamera;
+      try {
+        reconstructedScene = normalizeScene(JSON.parse(job.scene_json));
+        reconstructedCamera = normalizeCameraRig(JSON.parse(job.camera_json));
+      } catch {
+        throw new Error("重建任务返回的导演台场景数据无效");
+      }
+      state.history?.checkpoint();
+      const existingActors = state.scene.objects.filter((item) => item.type === "actor");
+      const hasProductionSetup = existingActors.length > 0
+        || state.cameraRig.cameras.length > 1
+        || state.cameraRig.cuts.length > 1;
+      if (reconstruction.preserveProduction && hasProductionSetup) {
+        reconstructedScene.appearance = structuredClone(state.scene.appearance);
+        reconstructedScene.objects.push(...structuredClone(existingActors));
+      } else {
+        state.cameraRig = reconstructedCamera;
+        state.selectedCameraId = reconstructedCamera.active_camera;
+        state.observationCameraId = reconstructedCamera.active_camera;
+        state.followCut = true;
+      }
+      state.scene = normalizeScene(reconstructedScene);
+      state.background.source = "Image Reconstruction";
+      state.background.path = "";
+      state.background.taskId = created.job_id;
+      state.selectedKind = state.scene.objects.length ? "object" : "camera";
+      state.selectedObjectId = state.scene.objects[0]?.id || null;
+      state.selectedPointIndex = 0;
+      invalidateRenderCache(state);
+      await state.loadBackground?.("");
+      if (!isCurrent()) return false;
+      runtime.rebuild();
+      runtime.applyAppearance();
+      runtime.fitView();
+      reconstruction.status = "complete";
+      reconstruction.message = job.report || "可编辑白模已载入导演台";
+      state.toolMessage = "图片白模已载入；可选择桌椅、窗户和墙体继续编辑";
+      state.history?.checkpoint();
+      state.refreshTools?.();
+      state.refreshInspectorTabs?.();
+      state.refreshAppearanceToolbar?.();
+      refreshAll(state);
+      return true;
+    }
+    if (job.status === "error") {
+      if (isCurrent()) state.refreshInspector?.();
+      throw new Error(job.message || "图片转可编辑白模失败");
+    }
+    if (isCurrent()) state.refreshInspector?.();
+  }
+  return false;
+}
+
 async function uploadLocalAsset(file, state, operationToken) {
   if (!file) return;
   const isCurrent = () => state.isCurrentBackgroundOperation?.(operationToken);
@@ -3448,17 +3554,29 @@ function addCameraFromCurrentView(state, runtime) {
 
 function renderSceneSourcePanel(container, state, runtime) {
   const details = element("details", "vod-previs__scene-source");
-  details.open = state.generation.status !== "idle" || !state.background.path;
+  const activity = state.background.source === "Image Reconstruction"
+    ? state.reconstruction : state.generation;
+  details.open = activity.status !== "idle" || !state.background.path;
   const summary = document.createElement("summary");
-  summary.textContent = state.background.path
+  summary.textContent = state.background.source === "Image Reconstruction"
+    ? "背景场景 · 图片可编辑白模"
+    : state.background.path
     ? `背景场景 · ${state.background.path.split(/[\\/]/).pop()}`
     : "背景场景 · 空白";
   details.appendChild(summary);
   details.appendChild(selectInput(
     "场景来源",
-    ["Blank", "Local Asset", "Tencent VOD Generated"],
+    ["Blank", "Local Asset", "Tencent VOD Generated", "Image Reconstruction"],
     state.background.source,
     (value) => {
+      if (["submitting", "queued", "running"].includes(state.generation.status)) {
+        state.generation.status = "idle";
+        state.generation.message = "";
+      }
+      if (["submitting", "queued", "running"].includes(state.reconstruction.status)) {
+        state.reconstruction.status = "idle";
+        state.reconstruction.message = "";
+      }
       state.beginBackgroundOperation?.();
       state.background.source = value;
       invalidateRenderCache(state);
@@ -3599,9 +3717,118 @@ function renderSceneSourcePanel(container, state, runtime) {
       || ["submitting", "queued", "running"].includes(state.generation.status);
     details.appendChild(submit);
   }
-  if (state.generation.message) {
-    const status = textElement("div", "vod-previs__status", state.generation.message);
-    status.dataset.state = state.generation.status;
+  if (state.background.source === "Image Reconstruction") {
+    const reconstruction = state.reconstruction;
+    details.appendChild(textElement(
+      "div",
+      "vod-previs__hint",
+      "从 1-3 张同一空间图片生成可逐件选择的桌椅、门窗、墙体和碰撞白模。主图会用于约束桌椅落地点和窗台高度；补充视图用于减少遮挡推测。",
+    ));
+    const uploads = element("div", "vod-previs__upload-grid");
+    const uploadLabels = [
+      ["主参考图（必选）", "用于实例位置与参考机位"],
+      ["补充视图 2", "同一空间侧面"],
+      ["补充视图 3", "同一空间反向"],
+    ];
+    reconstruction.images.forEach((file, index) => {
+      const label = element("label", "vod-previs__upload");
+      const input = document.createElement("input");
+      input.type = "file";
+      input.accept = "image/png,image/jpeg,image/webp";
+      input.addEventListener("change", () => {
+        reconstruction.images[index] = input.files?.[0] || null;
+        state.refreshInspector?.();
+      });
+      label.append(
+        input,
+        textElement("div", "", file ? file.name : uploadLabels[index][0]),
+        textElement("div", "", file ? "点击替换" : uploadLabels[index][1]),
+      );
+      uploads.appendChild(label);
+    });
+    details.appendChild(uploads);
+    details.appendChild(selectInput(
+      "空间类型",
+      ["室内通用", "教室", "办公室", "客厅", "卧室", "展厅", "餐厅", "摄影棚"],
+      reconstruction.sceneType,
+      (value) => { reconstruction.sceneType = value; },
+    ));
+    details.appendChild(numberInput(
+      "已知房间宽度（米，0=视觉估算）",
+      reconstruction.knownRoomWidth,
+      (value) => {
+        reconstruction.knownRoomWidth = clamp(value, 0, 100);
+      },
+      0.1,
+      "change",
+    ));
+    details.appendChild(numberInput(
+      "最大独立对象数",
+      reconstruction.maxObjects,
+      (value) => {
+        reconstruction.maxObjects = clamp(Math.round(value), 1, 56);
+      },
+      1,
+      "change",
+    ));
+    const guidanceField = element("label", "vod-previs__field");
+    guidanceField.appendChild(textElement("span", "", "补充约束（可选）"));
+    const guidance = element("textarea", "vod-previs__textarea");
+    guidance.placeholder = "例如：左侧三扇窗窗台约 0.9 米；每张桌子与后方椅子为一组";
+    guidance.value = reconstruction.additionalGuidance;
+    guidance.addEventListener("input", () => {
+      reconstruction.additionalGuidance = guidance.value;
+    });
+    guidanceField.appendChild(guidance);
+    details.appendChild(guidanceField);
+    const preserve = element("label", "vod-previs__confirm");
+    const preserveCheckbox = document.createElement("input");
+    preserveCheckbox.type = "checkbox";
+    preserveCheckbox.checked = reconstruction.preserveProduction;
+    preserveCheckbox.addEventListener("change", () => {
+      reconstruction.preserveProduction = preserveCheckbox.checked;
+    });
+    preserve.append(
+      preserveCheckbox,
+      textElement("span", "", "保留现有人物与多机位镜头；只替换环境白模"),
+    );
+    details.appendChild(preserve);
+    const confirm = element("label", "vod-previs__confirm");
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = reconstruction.confirmed;
+    checkbox.addEventListener("change", () => {
+      reconstruction.confirmed = checkbox.checked;
+      state.refreshInspector?.();
+    });
+    confirm.append(
+      checkbox,
+      textElement(
+        "span",
+        "",
+        "我确认提交会调用腾讯混元视觉并可能产生 Token 费用；生成完成后直接载入当前导演台。",
+      ),
+    );
+    details.appendChild(confirm);
+    const submit = button("生成并载入可编辑 3D 白模", async () => {
+      const operationToken = state.beginBackgroundOperation?.();
+      try {
+        await submitImageReconstruction(state, runtime, operationToken);
+      } catch (error) {
+        if (!state.isCurrentBackgroundOperation?.(operationToken)) return;
+        reconstruction.status = "error";
+        reconstruction.message = error.message;
+        state.refreshInspector?.();
+      }
+    }, true);
+    submit.disabled = !reconstruction.confirmed
+      || !reconstruction.images.some(Boolean)
+      || ["submitting", "queued", "running"].includes(reconstruction.status);
+    details.appendChild(submit);
+  }
+  if (activity.message) {
+    const status = textElement("div", "vod-previs__status", activity.message);
+    status.dataset.state = activity.status;
     details.appendChild(status);
   }
   if (state.background.path) {

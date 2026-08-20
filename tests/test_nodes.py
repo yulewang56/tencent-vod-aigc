@@ -2,6 +2,7 @@
 import json
 import os
 import sys
+import tempfile
 import types
 
 # ---- stub ComfyUI/numpy/PIL dependencies (not needed at import time) ----
@@ -65,6 +66,7 @@ except ImportError:
     sys.modules["PIL"] = pil
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))  # 仓库根目录
+import editable_scene
 import nodes
 
 failures = []
@@ -964,7 +966,9 @@ editable_prompt = nodes._build_reconstruction_prompt("教室", 0, 36, "", 1)
 check("editable 3d: prompt avoids room/camera numeric anchoring",
       '"width": 8.0' not in editable_prompt
       and '"position": [0.0, 1.7, -7.0]' not in editable_prompt
-      and "wall must be left/right/back/front" in editable_prompt)
+      and "wall must be left/right/back/front" in editable_prompt
+      and "image_bbox" in editable_prompt
+      and "floor_contact" in editable_prompt)
 normalized_editable = nodes._normalize_reconstruction_layout(
     extracted_editable, known_room_width_m=12, max_objects=12)
 check("editable 3d: known width rescales layout",
@@ -1027,6 +1031,140 @@ check("editable 3d: boards classify and attach to declared wall",
       and prior_normalized["objects"][2]["position"][0] == 4
       and prior_normalized["objects"][2]["size"][0] <= 0.14
       and prior_normalized["objects"][2]["movable"] is False)
+projection_layout = {
+    "room": {"width": 12, "depth": 12, "height": 3, "confidence": 0.8},
+    "camera": {
+        "position": [0, 1.7, -5], "target": [0, 1, 2], "fov_degrees": 55,
+    },
+    "objects": [
+        {
+            "name": "左桌", "category": "table",
+            "position": [0, 0, 0], "size": [1, 0.75, 0.6],
+            "confidence": 0.8, "evidence": "observed",
+            "image_bbox": [0.2, 0.45, 0.4, 0.8],
+            "floor_contact": [0.3, 0.8],
+        },
+        {
+            "name": "右桌", "category": "table",
+            "position": [0, 0, 0], "size": [1, 0.75, 0.6],
+            "confidence": 0.8, "evidence": "observed",
+            "image_bbox": [0.6, 0.45, 0.8, 0.8],
+            "floor_contact": [0.7, 0.8],
+        },
+        {
+            "name": "左桌重复", "category": "table",
+            "position": [0, 0, 0], "size": [1, 0.75, 0.6],
+            "confidence": 0.8, "evidence": "observed",
+            "image_bbox": [0.2, 0.45, 0.4, 0.8],
+            "floor_contact": [0.3, 0.8],
+        },
+        {
+            "name": "左桌配套椅", "category": "chair",
+            "position": [0, 0, 0], "size": [0.5, 0.85, 0.5],
+            "confidence": 0.8, "evidence": "observed",
+            "image_bbox": [0.25, 0.5, 0.4, 0.8],
+            "floor_contact": [0.3, 0.8],
+        },
+        {
+            "name": "侧窗", "category": "window", "wall": "back",
+            "position": [0, 2.4, 5.5], "size": [2, 1.2, 0.1],
+            "confidence": 0.8, "evidence": "observed",
+            "image_bbox": [0.2, 0.15, 0.45, 0.45],
+            "sill_height_m": 0.9,
+        },
+    ],
+}
+projection_normalized = nodes._normalize_reconstruction_layout(
+    projection_layout, known_room_width_m=0, max_objects=12,
+    image_aspect_ratio=16 / 9)
+check("editable 3d: photographed contacts preserve furniture spacing",
+      projection_normalized["objects"][0]["position"][0]
+      != projection_normalized["objects"][1]["position"][0]
+      and projection_normalized["objects"][0]["position"][0] < 0
+      < projection_normalized["objects"][1]["position"][0]
+      and all(item["projection_source"] == "image_contact"
+              for item in projection_normalized["objects"][:2]))
+check("editable 3d: duplicate observations drop and chair clears table",
+      len(projection_normalized["objects"]) == 4
+      and projection_normalized["objects"][2]["category"] == "chair"
+      and projection_normalized["objects"][2]["position"][2]
+      != projection_normalized["objects"][0]["position"][2]
+      and projection_normalized["objects"][2]["interaction_anchor"]["position"][2]
+      == projection_normalized["objects"][2]["position"][2])
+check("editable 3d: window image anchor corrects bad model Y",
+      0.45 <= projection_normalized["objects"][3]["position"][1] <= 1.5
+      and projection_normalized["objects"][3]["position"][1] != 2.4
+      and projection_normalized["objects"][3]["position"][2] == 6
+      and projection_normalized["objects"][3]["image_bbox"]
+      == [0.2, 0.15, 0.45, 0.45])
+edge_layout = {
+    "room": {"width": 12, "depth": 12, "height": 3, "confidence": 0.8},
+    "camera": projection_layout["camera"],
+    "objects": [
+        {
+            "name": "边界桌1", "category": "table",
+            "position": [6, 0, 0], "size": [1, 0.75, 0.6],
+            "confidence": 0.8, "evidence": "observed",
+            "image_bbox": [0, 0.45, 0.04, 0.65],
+            "floor_contact": [0.02, 0.65],
+        },
+        {
+            "name": "边界桌2", "category": "table",
+            "position": [6, 0, 0], "size": [1, 0.75, 0.6],
+            "confidence": 0.8, "evidence": "observed",
+            "image_bbox": [0.02, 0.45, 0.06, 0.65],
+            "floor_contact": [0.04, 0.65],
+        },
+    ],
+}
+edge_normalized = nodes._normalize_reconstruction_layout(
+    edge_layout, known_room_width_m=0, max_objects=12,
+    image_aspect_ratio=16 / 9)
+check("editable 3d: distinct edge observations do not collapse",
+      edge_normalized["objects"][0]["position"][0]
+      != edge_normalized["objects"][1]["position"][0]
+      and all(abs(item["position"][0]) <= 5.5
+              for item in edge_normalized["objects"]))
+edge_samples = [
+    editable_scene._inset_bound(value, 5.5)
+    for value in (5.44, 5.45, 5.5, 5.500001, 6.0)
+]
+check("editable 3d: soft edge bound stays continuous and monotonic",
+      edge_samples == sorted(edge_samples)
+      and max(edge_samples) <= 5.5
+      and edge_samples[3] - edge_samples[2] < 0.001)
+ray_camera = {
+    "position": [0, 1.7, -5],
+    "target": [0, 1.2, 0],
+    "fov_degrees": 55,
+}
+left_ray = editable_scene._image_ray([0.25, 0.75], ray_camera, 16 / 9)
+right_ray = editable_scene._image_ray([0.75, 0.75], ray_camera, 16 / 9)
+check("editable 3d: image axes map rightward and downward",
+      left_ray[0] < 0 < right_ray[0]
+      and left_ray[1] < 0 and right_ray[1] < 0)
+rotated_pair_layout = {
+    "room": {"width": 12, "depth": 12, "height": 3, "confidence": 0.8},
+    "camera": projection_layout["camera"],
+    "objects": [
+        {
+            "name": "边界桌", "category": "table",
+            "position": [0, 0, 5], "size": [1, 0.75, 0.6],
+            "yaw_degrees": 0, "confidence": 0.8, "evidence": "observed",
+        },
+        {
+            "name": "旋转边界椅", "category": "chair",
+            "position": [0, 0, 5], "size": [1.2, 0.85, 0.4],
+            "yaw_degrees": 90, "confidence": 0.8, "evidence": "observed",
+        },
+    ],
+}
+rotated_pair = nodes._normalize_reconstruction_layout(
+    rotated_pair_layout, known_room_width_m=0, max_objects=12)
+rotated_chair = rotated_pair["objects"][1]
+rotated_chair_half_z = rotated_chair["size"][0] * 0.5
+check("editable 3d: separated rotated chair remains in room",
+      abs(rotated_chair["position"][2]) + rotated_chair_half_z <= 6 + 1e-6)
 editable_scene, editable_camera, editable_manifest = nodes._build_scene_documents(
     normalized_editable, "hunyuan-vision-1.5-instruct", "req-editable", ["abc"])
 check("editable 3d: room shell and semantic objects generated",
@@ -1037,7 +1175,8 @@ check("editable 3d: room shell and semantic objects generated",
 parsed_editable_scene = nodes._parse_previs_scene(
     json.dumps(editable_scene, ensure_ascii=False))
 check("editable 3d: semantic category survives previs parsing",
-      parsed_editable_scene["objects"][4]["semantic"]["category"] == "table")
+      parsed_editable_scene["objects"][4]["semantic"]["category"] == "table"
+      and "projection_source" in parsed_editable_scene["objects"][4]["semantic"])
 check("editable 3d: reference camera generated",
       editable_camera["active_camera"] == "camera-reference"
       and len(editable_camera["cameras"][0]["keyframes"]) == 2)
@@ -1063,6 +1202,28 @@ check("editable 3d: fallback renderer uses base origin and yaw",
       and max(point[1] for point in captured_box_vertices) == 2
       and round(max(abs(point[0]) for point in captured_box_vertices), 6) == 2
       and round(max(abs(point[2]) for point in captured_box_vertices), 6) == 1)
+cleanup_dir = tempfile.mkdtemp(prefix="vod-previs-cleanup-")
+listed_upload = os.path.join(cleanup_dir, "listed.jpg")
+partial_upload = os.path.join(cleanup_dir, "partial.jpg")
+for cleanup_path in (listed_upload, partial_upload):
+    with open(cleanup_path, "wb") as handle:
+        handle.write(b"test")
+nodes._previs_cleanup_uploads([listed_upload], cleanup_dir)
+check("previs: upload cleanup removes untracked partial files",
+      not os.path.exists(cleanup_dir))
+with nodes._PREVIS_JOB_LOCK:
+    nodes._PREVIS_RECONSTRUCTION_JOBS.clear()
+    for index in range(20):
+        nodes._PREVIS_RECONSTRUCTION_JOBS[f"{index:032x}"] = {
+            "status": "complete",
+            "scene_json": "{}",
+            "_updated_at": float(index + 1),
+        }
+    nodes._previs_prune_reconstruction_jobs_locked(now=20)
+    retained_reconstruction_jobs = len(nodes._PREVIS_RECONSTRUCTION_JOBS)
+nodes._PREVIS_RECONSTRUCTION_JOBS.clear()
+check("previs: completed reconstruction jobs stay memory-bounded",
+      retained_reconstruction_jobs == nodes._MAX_PREVIS_RECONSTRUCTION_JOBS)
 
 class FakeImageFrame:
     def __init__(self, value):
