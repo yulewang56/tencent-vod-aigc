@@ -82,7 +82,8 @@ expected = ["TencentVODH3TextToVideo", "TencentVODH3ImageToVideo",
             "TencentVODAIGCCreateMaterial", "TencentVODAIGCImageTask",
             "TencentVODAIGCMusicTask", "TencentVODAIGCQueryTask",
             "TencentVODAIGCDownloadVideo", "TencentVODAIGCViewHistory",
-            "TencentVODHunyuan3DWorld", "TencentVOD3DPrevis"]
+            "TencentVODHunyuan3DWorld", "TencentVODImageToEditable3DScene",
+            "TencentVOD3DPrevis"]
 check("all nodes registered", set(expected) == set(nodes.NODE_CLASS_MAPPINGS),
       f"got {sorted(nodes.NODE_CLASS_MAPPINGS)}")
 check("display names cover all", set(expected) == set(nodes.NODE_DISPLAY_NAME_MAPPINGS))
@@ -935,6 +936,163 @@ try:
     check("3d: more than three views rejected", False)
 except ValueError as e:
     check("3d: more than three views rejected", "最多 3 张" in str(e), str(e))
+
+# ---- 25.1 图片转结构化可编辑白模（v1.24.0）----
+editable_raw = {
+    "room": {"width": 8, "depth": 10, "height": 3, "confidence": 0.82},
+    "camera": {
+        "position": [0, 1.7, -7], "target": [0, 1.2, 1], "fov_degrees": 56,
+    },
+    "objects": [
+        {
+            "name": "教师讲台", "category": "desk",
+            "position": [0, 0, 3.5], "size": [2, 0.9, 0.8],
+            "yaw_degrees": 0, "confidence": 0.9, "evidence": "observed",
+            "movable": False,
+        },
+        {
+            "name": "学生椅", "category": "chair",
+            "position": [-1.5, 0, 0.5], "size": [0.5, 0.85, 0.5],
+            "yaw_degrees": 5, "confidence": 0.75, "evidence": "inferred",
+            "movable": True,
+        },
+    ],
+}
+extracted_editable = nodes._extract_json_object(
+    "```json\n" + json.dumps(editable_raw, ensure_ascii=False) + "\n```")
+normalized_editable = nodes._normalize_reconstruction_layout(
+    extracted_editable, known_room_width_m=12, max_objects=12)
+check("editable 3d: known width rescales layout",
+      normalized_editable["room"]["width"] == 12
+      and normalized_editable["room"]["depth"] == 15
+      and normalized_editable["objects"][0]["category"] == "table")
+editable_without_camera = dict(editable_raw)
+editable_without_camera.pop("camera")
+normalized_without_camera = nodes._normalize_reconstruction_layout(
+    editable_without_camera, known_room_width_m=16, max_objects=12)
+check("editable 3d: default camera scales exactly once",
+      normalized_without_camera["camera"]["position"][2] == -16)
+out_of_bounds_layout = dict(editable_raw)
+out_of_bounds_layout["objects"] = [{
+    "name": "越界桌", "category": "table",
+    "position": [200, 0, 200], "size": [2, 1, 2],
+    "yaw_degrees": 45, "confidence": 0.7, "evidence": "observed",
+}]
+bounded_editable = nodes._normalize_reconstruction_layout(
+    out_of_bounds_layout, known_room_width_m=0, max_objects=12)
+bounded_object = bounded_editable["objects"][0]
+yaw_radians = numpy.deg2rad(bounded_object["yaw_degrees"])
+bounded_half_x = (
+    abs(numpy.cos(yaw_radians)) * bounded_object["size"][0] * 0.5
+    + abs(numpy.sin(yaw_radians)) * bounded_object["size"][2] * 0.5)
+bounded_half_z = (
+    abs(numpy.sin(yaw_radians)) * bounded_object["size"][0] * 0.5
+    + abs(numpy.cos(yaw_radians)) * bounded_object["size"][2] * 0.5)
+check("editable 3d: rotated footprint stays inside room",
+      abs(bounded_object["position"][0]) + bounded_half_x <= 4.0 + 1e-6
+      and abs(bounded_object["position"][2]) + bounded_half_z <= 5.0 + 1e-6)
+editable_scene, editable_camera, editable_manifest = nodes._build_scene_documents(
+    normalized_editable, "hunyuan-vision-1.5-instruct", "req-editable", ["abc"])
+check("editable 3d: room shell and semantic objects generated",
+      len(editable_scene["objects"]) == 6
+      and len(editable_manifest["entities"]) == 6
+      and editable_manifest["interaction_anchors"][0]["type"] == "surface"
+      and editable_scene["appearance"]["export_mode"] == "semantic")
+check("editable 3d: reference camera generated",
+      editable_camera["active_camera"] == "camera-reference"
+      and len(editable_camera["cameras"][0]["keyframes"]) == 2)
+editable_glb = nodes._build_editable_scene_glb(editable_manifest["entities"])
+check("editable 3d: valid GLB header and declared length",
+      editable_glb[:4] == b"glTF"
+      and int.from_bytes(editable_glb[4:8], "little") == 2
+      and int.from_bytes(editable_glb[8:12], "little") == len(editable_glb))
+captured_box_vertices = []
+orig_previs_project = nodes._previs_project
+nodes._previs_project = lambda point, camera, width, height: (
+    captured_box_vertices.append(point) or (point[0], point[1], 1.0))
+try:
+    fake_draw = types.SimpleNamespace(polygon=lambda *args, **kwargs: None)
+    nodes._previs_draw_box(
+        fake_draw,
+        {"scale": [2, 2, 4], "rotation": [0, numpy.pi / 2, 0]},
+        [0, 0, 0], {}, 100, 100, (128, 128, 128), False)
+finally:
+    nodes._previs_project = orig_previs_project
+check("editable 3d: fallback renderer uses base origin and yaw",
+      min(point[1] for point in captured_box_vertices) == 0
+      and max(point[1] for point in captured_box_vertices) == 2
+      and round(max(abs(point[0]) for point in captured_box_vertices), 6) == 2
+      and round(max(abs(point[2]) for point in captured_box_vertices), 6) == 1)
+
+class FakeImageFrame:
+    def __init__(self, value):
+        self.value = value
+
+    def cpu(self):
+        return self
+
+    def numpy(self):
+        return self.value
+
+
+class FakeImageBatch:
+    def __init__(self, values):
+        self.values = values
+        self.shape = (len(values),) + values[0].shape
+
+    def __getitem__(self, index):
+        return FakeImageFrame(self.values[index])
+
+
+try:
+    nodes.TencentVODImageToEditable3DScene().reconstruct(
+        FakeImageBatch([numpy.zeros((32, 48, 3), dtype=numpy.float32)]),
+        "教室", 0, 12, "Disabled")
+    check("editable 3d: explicit paid confirmation required", False)
+except ValueError as error:
+    check("editable 3d: explicit paid confirmation required",
+          "confirm_paid_request" in str(error), str(error))
+
+captured_editable = {}
+orig_call_editable = nodes._call_api
+orig_resolve_editable = nodes._resolve_secret_pair
+nodes._resolve_secret_pair = lambda secret_id, secret_key: ("AKIDx", "sk")
+def fake_editable_call(sid, sk, reg, ep, action, payload, version="", service=""):
+    captured_editable.update({
+        "endpoint": ep, "action": action, "payload": payload,
+        "version": version, "service": service,
+    })
+    return {
+        "RequestId": "req-editable-flow",
+        "Choices": [{
+            "FinishReason": "stop",
+            "Message": {"Content": json.dumps(editable_raw, ensure_ascii=False)},
+        }],
+    }
+nodes._call_api = fake_editable_call
+try:
+    editable_result = nodes.TencentVODImageToEditable3DScene().reconstruct(
+        FakeImageBatch([numpy.zeros((32, 48, 3), dtype=numpy.float32)]),
+        "教室", 8, 12, "Enabled", filename="test_editable_scene")
+    check("editable 3d: Hunyuan Vision TC3 request",
+          captured_editable["action"] == "ChatCompletions"
+          and captured_editable["version"] == "2023-09-01"
+          and captured_editable["service"] == "hunyuan"
+          and captured_editable["endpoint"] == "hunyuan.ai.tencentcloudapi.com"
+          and captured_editable["payload"]["Messages"][0]["Contents"][1][
+              "ImageUrl"]["Url"].startswith("data:image/jpeg;base64,"))
+    check("editable 3d: node emits scene/camera/manifest and collision GLB",
+          isinstance(editable_result[0], FakeFile3D)
+          and os.path.isfile(editable_result[1])
+          and json.loads(editable_result[2])["version"] == 3
+          and json.loads(editable_result[3])["version"] == 3
+          and json.loads(editable_result[4])["generator"].endswith("structured-whitebox")
+          and os.path.isfile(editable_result[5])
+          and isinstance(editable_result[6], FakeFile3D)
+          and "可直接连接 3D 白模预演台" in editable_result[7])
+finally:
+    nodes._call_api = orig_call_editable
+    nodes._resolve_secret_pair = orig_resolve_editable
 
 scene_3d = nodes._parse_previs_scene(nodes._DEFAULT_PREVIS_SCENE)
 camera_3d = nodes._parse_previs_camera(nodes._DEFAULT_PREVIS_CAMERA)

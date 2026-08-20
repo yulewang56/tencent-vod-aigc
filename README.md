@@ -1,7 +1,8 @@
 # tencent-vod-aigc
 
 ComfyUI 自定义节点：通过**腾讯云 VOD AIGC** 聚合服务调用 **MiniMax Hailuo H3**、**VS**
-生视频模型与**混元 3D 世界生成**，另含本地 **3D 白模预演台**、生图、素材注册和
+生视频模型与**混元 3D 世界生成**，并通过**混元视觉**将场景图片重建为结构化可编辑白模；
+另含本地 **3D 白模预演台**、生图、素材注册和
 **MPS AI 音乐生成**（GL / MiniMaxMusic）。
 
 协议为腾讯云 API v3（TC3-HMAC-SHA256 签名，`CreateAigcVideoTask` / `DescribeTaskDetail`，
@@ -20,6 +21,7 @@ ComfyUI 自定义节点：通过**腾讯云 VOD AIGC** 聚合服务调用 **Mini
 | `VOD AIGC - 文生图/图生图` | 生图：GEM / Jimeng（3.3.2）+ GPT-Image2（3.14，OG image2_low/medium/high），支持多图输出（1-8 张）、输出格式，可接 ComfyUI 图像、本地图片路径或参考图 URL；`preview_image` 输出 IMAGE 张量（原生预览 + 可接下游） |
 | `VOD AIGC - 音乐生成 (MPS)` | AI 音乐生成：GL / MiniMaxMusic，支持歌词与纯音乐、参考音频（路径/URL）、mp3/wav 输出 |
 | `VOD AIGC - 混元 3D 世界生成` | VOD `Hunyuan / 3d_2.0 / 3d_scene`：文本或 1-3 张参考图生成可漫游 3D 世界，输出本地路径和原生 `FILE_3D`（当前文档示例通常为 `.spz`） |
+| `VOD AIGC - 图片转可编辑 3D 白模` | 1-3 张同空间图片经混元视觉估计房间、参考机位和独立对象包围盒，本地输出场景 GLB、碰撞 GLB、Manifest，以及可直接连接导演台的 `scene_json / camera_json` |
 | `VOD AIGC - 3D 白模预演台` | 一体化 WebGL 工作台：空白/本地/SPZ 云端生成场景、立体人物、曲线速度、多摄影机/切镜及确定性镜头输出；只有主动确认生成场景时才调用 VOD |
 | `VOD AIGC - 查询任务` | 按 TaskId 查状态（超时/失败排查用） |
 | `VOD AIGC - 下载视频` | 按 URL 重新下载视频 |
@@ -153,6 +155,24 @@ cp tencent-vod-config.example.json tencent-vod-config.json
   MPS 无 SubAppId，凭据仅需 SecretId / SecretKey；台账 mode 记 `t2a`（不计秒不计费）
 
 ### 3D 世界与白模预演
+
+**图片转可编辑 3D 白模**：
+
+- 输入同一空间的 1-3 张图片；第一张为主参考视角。节点调用腾讯混元
+  `ChatCompletions` 视觉模型，提取房间尺度、参考相机和主要物体的三维包围盒，再由本地纯
+  Python 打包器生成独立命名对象组成的 `scene.glb`
+- 同时输出 `scene_json / camera_json`，分别连接 `3D 白模预演台` 的同名输入即可进入现有
+  层级、对象变换、语义配色、人物路径、多机位和时间线编辑；无需把 GLB 当成不可编辑背景
+- `scene_manifest` 记录对象分类、置信度、`observed / inferred / assumed` 证据等级、
+  可移动标志、碰撞代理和座椅/门/桌面等交互 Anchor；`collision.glb` 是盒状碰撞代理，
+  正式 NavMesh 仍应在目标引擎按角色半径、坡度和台阶参数重新烘焙
+- `known_room_width_m` 可提供真实房间宽度以统一缩放；留 0 时尺度来自门、家具等视觉先验。
+  单图遮挡区域本质上不可确定，专业使用建议提供 2-3 个方向明确、曝光一致的视图
+- 节点必须显式启用 `confirm_paid_request` 才会调用混元视觉；其费用按所选模型 Token 规则
+  结算，不属于 VOD 视频或 3D 世界按次计费
+- 这是影视预演级结构化包围盒白模，不是照片级表面 Mesh 或测量级扫描。腾讯云 AI3D 另有
+  `SubmitHunyuanTo3DProJob`，可将**单个物体**生成 Geometry 白模 GLB，但没有公开的
+  “整房间图片 → 语义场景图 + Collider/NavMesh”接口；重要道具可在后续阶段用该能力替换代理
 
 **混元 3D 世界生成**：
 

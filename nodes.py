@@ -60,6 +60,14 @@ from vod_aigc_core import (
     build_ext_info as _build_ext_info,
     validate_vs_options as _validate_vs_options,
 )
+from editable_scene import (
+    build_reconstruction_prompt as _build_reconstruction_prompt,
+    extract_json_object as _extract_json_object,
+    normalize_reconstruction_layout as _normalize_reconstruction_layout,
+    build_scene_documents as _build_scene_documents,
+    build_glb as _build_editable_scene_glb,
+    write_scene_package as _write_scene_package,
+)
 
 # folder_paths 在不同 ComfyUI 版本位置不同：经典版是仓库根目录的顶层模块，新版在 comfy 包内
 try:
@@ -1298,11 +1306,24 @@ def _previs_draw_grid(draw, camera, width, height, line_color):
 
 
 def _previs_draw_box(draw, item, position, camera, width, height, fill, semantic):
-    sx, sy, sz = [v * 0.5 for v in item["scale"]]
+    sx, sy, sz = item["scale"][0] * 0.5, item["scale"][1], item["scale"][2] * 0.5
+    rotation = item.get("rotation") or [0, 0, 0]
+    rx, ry, rz = rotation
+    sin_x, cos_x = np.sin(rx), np.cos(rx)
+    sin_y, cos_y = np.sin(ry), np.cos(ry)
+    sin_z, cos_z = np.sin(rz), np.cos(rz)
+    rotation_matrix = np.asarray([
+        [cos_z * cos_y, cos_z * sin_y * sin_x - sin_z * cos_x,
+         cos_z * sin_y * cos_x + sin_z * sin_x],
+        [sin_z * cos_y, sin_z * sin_y * sin_x + cos_z * cos_x,
+         sin_z * sin_y * cos_x - cos_z * sin_x],
+        [-sin_y, cos_y * sin_x, cos_y * cos_x],
+    ], dtype=np.float64)
     vertices = [
-        [position[0] + x, position[1] + y, position[2] + z]
-        for x, y, z in ((-sx, -sy, -sz), (sx, -sy, -sz), (sx, sy, -sz), (-sx, sy, -sz),
-                        (-sx, -sy, sz), (sx, -sy, sz), (sx, sy, sz), (-sx, sy, sz))
+        (np.asarray(position, dtype=np.float64)
+         + rotation_matrix @ np.asarray(local, dtype=np.float64)).tolist()
+        for local in ((-sx, 0, -sz), (sx, 0, -sz), (sx, sy, -sz), (-sx, sy, -sz),
+                      (-sx, 0, sz), (sx, 0, sz), (sx, sy, sz), (-sx, sy, sz))
     ]
     projected = [_previs_project(vertex, camera, width, height) for vertex in vertices]
     faces = ((0, 1, 2, 3), (4, 5, 6, 7), (0, 4, 7, 3),
@@ -1877,9 +1898,9 @@ def _ledger(mode):
 
 # ---------------------------------------------------------------- 输入模板
 
-def _cred_inputs():
+def _cred_inputs(include_sub_app_id=True):
     """凭据输入模板：display_name 为前端显示名（可选标记），键名保持 secret_id 不变。"""
-    return {
+    values = {
         "secret_id": ("STRING", {"default": "", "display_name": "secret_id (optional)",
                                  "tooltip": "（选填）腾讯云 CAM SecretId。留空则自动读取节点包内 tencent-vod-config.json，建议留空以免密钥写入工作流 JSON"}),
         "secret_key": ("STRING", {"default": "", "display_name": "secret_key (optional)",
@@ -1887,6 +1908,9 @@ def _cred_inputs():
         "sub_app_id": ("STRING", {"default": "", "display_name": "sub_app_id (optional)",
                                   "tooltip": "（选填）VOD 应用 ID。留空则自动读取节点包内 tencent-vod-config.json"}),
     }
+    if not include_sub_app_id:
+        values.pop("sub_app_id")
+    return values
 
 
 def _output_config_inputs():
@@ -2783,6 +2807,158 @@ class TencentVODHunyuan3DWorld:
         return (task_id, url, path, _file_3d_value(path))
 
 
+class TencentVODImageToEditable3DScene:
+    """图片 → 混元视觉结构理解 → 本地独立白模对象与导演台场景。"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        required = {
+            "image": ("IMAGE", {
+                "tooltip": "同一空间的 1-3 张参考图；batch 第一张为主视角"}),
+            "scene_type": ([
+                "室内通用", "教室", "办公室", "客厅", "卧室", "展厅", "餐厅", "摄影棚",
+            ], {"default": "室内通用"}),
+            "known_room_width_m": ("FLOAT", {
+                "default": 0.0, "min": 0.0, "max": 100.0, "step": 0.1,
+                "tooltip": "已知房间宽度（米）；0 表示由视觉模型估算尺度"}),
+            "max_objects": ("INT", {
+                "default": 36, "min": 1, "max": 56, "step": 1,
+                "tooltip": "识别并创建的独立对象上限；房间地面和三面墙另计"}),
+            "confirm_paid_request": (ON_OFF, {
+                "default": "Disabled",
+                "tooltip": "必须显式启用；会调用腾讯混元视觉并按其 Token 规则计费"}),
+        }
+        optional = dict(_cred_inputs(include_sub_app_id=False))
+        optional.update({
+            "additional_guidance": ("STRING", {
+                "multiline": True, "default": "",
+                "tooltip": "补充门窗位置、已知尺寸、遮挡关系或希望保留的主要物体"}),
+            "model": ([
+                "hunyuan-vision-1.5-instruct",
+                "hunyuan-t1-vision-20250916",
+            ], {"default": "hunyuan-vision-1.5-instruct"}),
+            "region": ("STRING", {"default": ""}),
+            "endpoint": ("STRING", {
+                "default": "hunyuan.ai.tencentcloudapi.com",
+                "tooltip": "腾讯混元 ChatCompletions API 域名"}),
+            "filename": ("STRING", {"default": "editable_scene"}),
+        })
+        return {"required": required, "optional": optional}
+
+    RETURN_TYPES = (
+        "FILE_3D", "STRING", "STRING", "STRING",
+        "STRING", "STRING", "FILE_3D", "STRING",
+    )
+    RETURN_NAMES = (
+        "scene_3d", "scene_path", "scene_json", "camera_json",
+        "scene_manifest", "manifest_path", "collision_3d", "reconstruction_report",
+    )
+    FUNCTION = "reconstruct"
+    CATEGORY = "Tencent VOD AIGC/3D Previs"
+    OUTPUT_NODE = True
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("NaN")
+
+    def reconstruct(self, image, scene_type, known_room_width_m, max_objects,
+                    confirm_paid_request, **kwargs):
+        if confirm_paid_request != "Enabled":
+            raise ValueError("请先启用 confirm_paid_request，确认调用混元视觉可能产生费用")
+        if image is None or not hasattr(image, "shape") or len(image.shape) < 4:
+            raise ValueError("image 必须是 ComfyUI IMAGE batch")
+        view_count = int(image.shape[0])
+        if not 1 <= view_count <= 3:
+            raise ValueError(f"可编辑场景重建仅支持 1-3 张参考图，当前有 {view_count} 张")
+        secret_id, secret_key = _resolve_secret_pair(
+            kwargs.get("secret_id"), kwargs.get("secret_key"))
+        model = kwargs.get("model") or "hunyuan-vision-1.5-instruct"
+        encoded_images = []
+        image_hashes = []
+        for index in range(view_count):
+            encoded = _image_tensor_to_base64(image, index)
+            encoded_images.append(encoded)
+            image_hashes.append(hashlib.sha256(base64.b64decode(encoded)).hexdigest())
+        prompt = _build_reconstruction_prompt(
+            scene_type,
+            float(known_room_width_m),
+            int(max_objects),
+            kwargs.get("additional_guidance") or "",
+            view_count,
+        )
+        contents = [{"Type": "text", "Text": prompt}]
+        contents.extend({
+            "Type": "image_url",
+            "ImageUrl": {"Url": f"data:image/jpeg;base64,{encoded}"},
+        } for encoded in encoded_images)
+        payload = {
+            "Model": model,
+            "Messages": [{"Role": "user", "Contents": contents}],
+            "Stream": False,
+            "Temperature": 0.1,
+        }
+        _set_status(self, "混元视觉正在分析空间结构…")
+        response = _call_api(
+            secret_id,
+            secret_key,
+            kwargs.get("region") or "",
+            kwargs.get("endpoint") or "hunyuan.ai.tencentcloudapi.com",
+            "ChatCompletions",
+            payload,
+            version="2023-09-01",
+            service="hunyuan",
+        )
+        choices = response.get("Choices")
+        if not isinstance(choices, list) or not choices:
+            raise RuntimeError("混元视觉响应缺少 Choices")
+        choice = choices[0] if isinstance(choices[0], dict) else {}
+        if str(choice.get("FinishReason") or "").lower() == "sensitive":
+            raise RuntimeError("混元视觉安全审核未通过，未生成场景")
+        message = choice.get("Message") if isinstance(choice.get("Message"), dict) else {}
+        raw_content = message.get("Content")
+        layout = _normalize_reconstruction_layout(
+            _extract_json_object(raw_content),
+            known_room_width_m=float(known_room_width_m),
+            max_objects=int(max_objects),
+        )
+        request_id = str(response.get("RequestId") or response.get("Id") or "")
+        scene, camera, manifest = _build_scene_documents(
+            layout, model, request_id, image_hashes)
+        _set_status(self, "正在生成 GLB、碰撞代理和导演台场景…")
+        paths = _write_scene_package(
+            folder_paths.get_output_directory(),
+            kwargs.get("filename") or "editable_scene",
+            scene,
+            camera,
+            manifest,
+        )
+        scene_json = json.dumps(scene, ensure_ascii=False, indent=2)
+        camera_json = json.dumps(camera, ensure_ascii=False, indent=2)
+        manifest_json = json.dumps(manifest, ensure_ascii=False, indent=2)
+        warnings = manifest["warnings"]
+        report_lines = [
+            f"已生成 {len(manifest['entities'])} 个独立白模对象",
+            f"房间估计：{manifest['room']['width']:.2f}m × "
+            f"{manifest['room']['depth']:.2f}m × {manifest['room']['height']:.2f}m",
+            f"尺度来源：{manifest['room']['scale_source']}",
+            "scene_json 和 camera_json 可直接连接 3D 白模预演台",
+            "这是影视预演级包围盒重建，不是测量级扫描或高精度表面 Mesh",
+        ]
+        if warnings:
+            report_lines.append("修正/警告：" + "；".join(warnings))
+        _set_status(self, f"完成（{len(manifest['entities'])} 个可编辑对象）")
+        return (
+            _file_3d_value(paths["scene"]),
+            paths["scene"],
+            scene_json,
+            camera_json,
+            manifest_json,
+            paths["manifest"],
+            _file_3d_value(paths["collision"]),
+            "\n".join(report_lines),
+        )
+
+
 class TencentVOD3DPrevis:
     """本地白模预演：对象/摄影机 JSON → 可合成为参考视频的 IMAGE 帧序列。"""
 
@@ -3058,6 +3234,7 @@ NODE_CLASS_MAPPINGS = {
     "TencentVODAIGCDownloadVideo": TencentVODAIGCDownloadVideo,
     "TencentVODAIGCViewHistory": TencentVODAIGCViewHistory,
     "TencentVODHunyuan3DWorld": TencentVODHunyuan3DWorld,
+    "TencentVODImageToEditable3DScene": TencentVODImageToEditable3DScene,
     "TencentVOD3DPrevis": TencentVOD3DPrevis,
 }
 
@@ -3073,6 +3250,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "TencentVODAIGCDownloadVideo": "VOD AIGC - 下载视频",
     "TencentVODAIGCViewHistory": "VOD AIGC - 查看执行台账",
     "TencentVODHunyuan3DWorld": "VOD AIGC - 混元 3D 世界生成",
+    "TencentVODImageToEditable3DScene": "VOD AIGC - 图片转可编辑 3D 白模",
     "TencentVOD3DPrevis": "VOD AIGC - 3D 白模预演台",
 }
 
