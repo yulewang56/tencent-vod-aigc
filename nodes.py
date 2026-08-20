@@ -85,10 +85,10 @@ except ImportError:
 # ---------------------------------------------------------------- 模块级委托（测试可打桩）
 
 def _call_api(secret_id: str, secret_key: str, region: str, endpoint: str, action: str,
-              payload: dict, version=API_VERSION, service=SERVICE) -> dict:
+              payload: dict, version=API_VERSION, service=SERVICE, timeout=60) -> dict:
     """调用腾讯云接口，返回 Response 对象；业务错误抛 RuntimeError（委托 core.call_api）。"""
     return core.call_api(secret_id, secret_key, region, endpoint, action, payload,
-                         version=version, service=service)
+                         version=version, service=service, timeout=timeout)
 
 
 def _wait_for_task(secret_id, secret_key, region, endpoint, sub_app_id, task_id,
@@ -2841,6 +2841,9 @@ class TencentVODImageToEditable3DScene:
             "endpoint": ("STRING", {
                 "default": "hunyuan.ai.tencentcloudapi.com",
                 "tooltip": "腾讯混元 ChatCompletions API 域名"}),
+            "request_timeout": ("INT", {
+                "default": 240, "min": 60, "max": 600, "step": 30,
+                "tooltip": "混元视觉同步请求超时（秒）；复杂场景通常需要 1-4 分钟"}),
             "filename": ("STRING", {"default": "editable_scene"}),
         })
         return {"required": required, "optional": optional}
@@ -2907,6 +2910,7 @@ class TencentVODImageToEditable3DScene:
             payload,
             version="2023-09-01",
             service="hunyuan",
+            timeout=int(kwargs.get("request_timeout", 240)),
         )
         choices = response.get("Choices")
         if not isinstance(choices, list) or not choices:

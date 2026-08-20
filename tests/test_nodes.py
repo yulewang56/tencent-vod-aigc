@@ -1057,10 +1057,10 @@ captured_editable = {}
 orig_call_editable = nodes._call_api
 orig_resolve_editable = nodes._resolve_secret_pair
 nodes._resolve_secret_pair = lambda secret_id, secret_key: ("AKIDx", "sk")
-def fake_editable_call(sid, sk, reg, ep, action, payload, version="", service=""):
+def fake_editable_call(sid, sk, reg, ep, action, payload, version="", service="", timeout=60):
     captured_editable.update({
         "endpoint": ep, "action": action, "payload": payload,
-        "version": version, "service": service,
+        "version": version, "service": service, "timeout": timeout,
     })
     return {
         "RequestId": "req-editable-flow",
@@ -1078,6 +1078,7 @@ try:
           captured_editable["action"] == "ChatCompletions"
           and captured_editable["version"] == "2023-09-01"
           and captured_editable["service"] == "hunyuan"
+          and captured_editable["timeout"] == 240
           and captured_editable["endpoint"] == "hunyuan.ai.tencentcloudapi.com"
           and captured_editable["payload"]["Messages"][0]["Contents"][1][
               "ImageUrl"]["Url"].startswith("data:image/jpeg;base64,"))

@@ -169,7 +169,8 @@ cp tencent-vod-config.example.json tencent-vod-config.json
 - `known_room_width_m` 可提供真实房间宽度以统一缩放；留 0 时尺度来自门、家具等视觉先验。
   单图遮挡区域本质上不可确定，专业使用建议提供 2-3 个方向明确、曝光一致的视图
 - 节点必须显式启用 `confirm_paid_request` 才会调用混元视觉；其费用按所选模型 Token 规则
-  结算，不属于 VOD 视频或 3D 世界按次计费
+  结算，不属于 VOD 视频或 3D 世界按次计费。视觉分析是同步长请求，`request_timeout` 默认
+  240 秒；复杂场景可提高到 600 秒
 - 这是影视预演级结构化包围盒白模，不是照片级表面 Mesh 或测量级扫描。腾讯云 AI3D 另有
   `SubmitHunyuanTo3DProJob`，可将**单个物体**生成 Geometry 白模 GLB，但没有公开的
   “整房间图片 → 语义场景图 + Collider/NavMesh”接口；重要道具可在后续阶段用该能力替换代理

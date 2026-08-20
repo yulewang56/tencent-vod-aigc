@@ -150,7 +150,7 @@ def _sign_request(secret_id: str, secret_key: str, region: str, endpoint: str, a
 
 
 def call_api(secret_id: str, secret_key: str, region: str, endpoint: str, action: str,
-             payload: dict, version=API_VERSION, service=SERVICE) -> dict:
+             payload: dict, version=API_VERSION, service=SERVICE, timeout=60) -> dict:
     """调用腾讯云接口，返回 Response 对象；业务错误抛 RuntimeError。"""
     endpoint = (endpoint or DEFAULT_ENDPOINT).strip()
     endpoint = endpoint.replace("https://", "").replace("http://", "").rstrip("/")
@@ -158,7 +158,7 @@ def call_api(secret_id: str, secret_key: str, region: str, endpoint: str, action
                                   version=version, service=service)
     req = urllib.request.Request(f"https://{endpoint}/", data=body, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8")
     except urllib.error.HTTPError as e:
         raise RuntimeError(f"HTTP {e.code} — {endpoint} 返回: {e.read().decode('utf-8', 'ignore')[:500]}")
