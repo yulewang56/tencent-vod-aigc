@@ -814,6 +814,8 @@ def _parse_previs_scene(raw):
             "motion": str(item.get("motion") or "static").lower(),
             "appearance": _normalize_previs_object_appearance(
                 item.get("appearance"), f"objects[{index}].appearance"),
+            "semantic": dict(item.get("semantic"))
+            if isinstance(item.get("semantic"), dict) else {},
         })
     return {
         "version": 3,

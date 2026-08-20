@@ -166,6 +166,9 @@ cp tencent-vod-config.example.json tencent-vod-config.json
 - `scene_manifest` 记录对象分类、置信度、`observed / inferred / assumed` 证据等级、
   可移动标志、碰撞代理和座椅/门/桌面等交互 Anchor；`collision.glb` 是盒状碰撞代理，
   正式 NavMesh 仍应在目标引擎按角色半径、坡度和台阶参数重新烘焙
+- 本地几何规范化会用类别物理先验修正桌面/座面厚度被误当成整体高度的常见错误，并将门、窗、
+  黑板和白板按模型输出的 `wall` 吸附到一致墙面；导演台中的课桌、椅子和窗户使用参数化组合
+  代理显示，但仍各自保持一个可选择、可变换的场景对象
 - `known_room_width_m` 可提供真实房间宽度以统一缩放；留 0 时尺度来自门、家具等视觉先验。
   单图遮挡区域本质上不可确定，专业使用建议提供 2-3 个方向明确、曝光一致的视图
 - 节点必须显式启用 `confirm_paid_request` 才会调用混元视觉；其费用按所选模型 Token 规则

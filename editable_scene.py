@@ -17,8 +17,11 @@ _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 _EVIDENCE_VALUES = {"observed", "inferred", "assumed"}
 _STRUCTURAL_CATEGORIES = {"architecture", "wall", "floor", "ceiling"}
 _OPENING_CATEGORIES = {"door", "window", "opening"}
+_MOUNTED_CATEGORIES = _OPENING_CATEGORIES | {"board"}
+_WALL_VALUES = {"left", "right", "back", "front"}
 _SEMANTIC_COLORS = {
     "architecture": "#9aa4af",
+    "board": "#426457",
     "door": "#c28a52",
     "window": "#67a8c7",
     "furniture": "#cf8b45",
@@ -48,40 +51,36 @@ layout. {scale_instruction}
 Coordinate system:
 - X points image-right, Y points up, Z points away from the primary camera.
 - Floor is Y=0. The room is centered at X=0, Z=0.
-- Object position is the center of its floor footprint at Y=0.
-- Size is [width, height, depth] in meters.
+- Floor-standing object position is the center of its footprint with Y=0.
+- A wall-mounted object position uses the lower-edge center and may have Y>0.
+- Size is the FULL physical bounding box [width, total height, depth] in meters.
+  For tables and chairs, total height includes legs and the chair back; never
+  report only tabletop, seat, or panel thickness as total height.
 - Do not include people, pictures of objects, reflections, text, or tiny clutter.
 - Use one axis-aligned or yaw-rotated box proxy per physical object.
 - Mark hidden geometry as inferred. Do not invent decorative detail.
 - Keep every object inside or directly against the room bounds.
+- For door, window, and board objects, set wall to left/right/back/front.
+  Objects visible on the same physical wall must use the same wall value.
 - Return at most {max_objects} objects.
 
-Return only one JSON object, with no Markdown:
-{{
-  "room": {{
-    "width": 8.0,
-    "depth": 10.0,
-    "height": 3.0,
-    "confidence": 0.7
-  }},
-  "camera": {{
-    "position": [0.0, 1.7, -7.0],
-    "target": [0.0, 1.2, 1.0],
-    "fov_degrees": 55.0
-  }},
-  "objects": [
-    {{
-      "name": "descriptive unique name",
-      "category": "door|window|table|chair|storage|appliance|furniture|prop|unknown",
-      "position": [0.0, 0.0, 0.0],
-      "size": [1.0, 1.0, 1.0],
-      "yaw_degrees": 0.0,
-      "confidence": 0.8,
-      "evidence": "observed|inferred|assumed",
-      "movable": true
-    }}
-  ]
-}}
+Use these exact JSON fields without copying any preset scene dimensions:
+- room: width, depth, height, confidence (all numeric)
+- camera: position (3 numbers), target (3 numbers), fov_degrees
+- objects: array of objects containing name, category, position (3 numbers),
+  size (3 numbers), yaw_degrees, confidence, evidence, movable, and wall
+- category must be one of:
+  board, door, window, table, chair, storage, appliance, furniture, prop, unknown
+- wall must be left/right/back/front for mounted objects and an empty string otherwise
+
+Before replying, verify:
+- classroom tables have a plausible full height, not tabletop thickness
+- classroom chairs include seat, legs, and back in their full height
+- doors start at floor level and use plausible human-scale dimensions
+- wall fixtures are thin and share a consistent wall plane
+- room and camera numbers were inferred from the image, not copied from this instruction
+
+Return only one valid JSON object with those fields and no Markdown.
 
 Additional user guidance: {guidance}
 """.strip()
@@ -151,9 +150,71 @@ def _category(value):
         "desk": "table",
         "stool": "chair",
         "entrance": "door",
+        "blackboard": "board",
+        "chalkboard": "board",
+        "whiteboard": "board",
     }
     category = aliases.get(category, category)
     return category if category in _SEMANTIC_COLORS else "unknown"
+
+
+def _apply_category_priors(name, category, position, size, room_height, warnings):
+    """Correct common VLM dimension-semantic mistakes without changing layout."""
+    original_position = list(position)
+    original_size = list(size)
+    if category == "table":
+        position[1] = 0.0
+        if size[1] < 0.55 or size[1] > 1.15:
+            size[1] = 0.75
+        size[0] = min(max(size[0], 0.5), 3.0)
+        size[2] = min(max(size[2], 0.4), 1.5)
+    elif category == "chair":
+        position[1] = 0.0
+        if size[1] < 0.55 or size[1] > 1.3:
+            size[1] = 0.85
+        size[0] = min(max(size[0], 0.35), 1.2)
+        size[2] = min(max(size[2], 0.35), 1.2)
+    elif category == "door":
+        position[1] = 0.0
+        size[0] = min(max(size[0], 0.8), 1.8)
+        size[1] = min(max(size[1], 1.9), room_height)
+        size[2] = min(max(size[2], 0.06), 0.18)
+    elif category == "window":
+        size[0] = min(max(size[0], 0.6), 4.0)
+        size[1] = min(max(size[1], 0.8), min(2.2, room_height))
+        size[2] = min(max(size[2], 0.05), 0.16)
+    elif category == "board":
+        size[0] = min(max(size[0], 1.0), 6.0)
+        size[1] = min(max(size[1], 0.8), min(2.0, room_height))
+        size[2] = min(max(size[2], 0.04), 0.14)
+    if position != original_position or size != original_size:
+        warnings.append(f"{name} 的尺寸/高度已按 {category} 物理先验修正")
+
+
+def _nearest_wall(position, width, depth):
+    distances = {
+        "left": abs(position[0] + width * 0.5),
+        "right": abs(position[0] - width * 0.5),
+        "back": abs(position[2] - depth * 0.5),
+        "front": abs(position[2] + depth * 0.5),
+    }
+    return min(distances, key=distances.get)
+
+
+def _attach_to_wall(wall, position, size, width, depth):
+    """Make mounted proxies thin and place their lower edge on one wall plane."""
+    span = max(size[0], size[2])
+    thickness = min(size[0], size[2], 0.14)
+    if wall in {"left", "right"}:
+        size[0], size[2] = thickness, span
+        position[0] = -width * 0.5 if wall == "left" else width * 0.5
+        limit = max(0.0, depth * 0.5 - span * 0.5)
+        position[2] = min(max(position[2], -limit), limit)
+    else:
+        size[0], size[2] = span, thickness
+        position[2] = depth * 0.5 if wall == "back" else -depth * 0.5
+        limit = max(0.0, width * 0.5 - span * 0.5)
+        position[0] = min(max(position[0], -limit), limit)
 
 
 def _interaction_anchor(category, position, size):
@@ -216,12 +277,23 @@ def normalize_reconstruction_layout(raw, known_room_width_m=0.0, max_objects=36)
         evidence = str(item.get("evidence") or "inferred").strip().lower()
         if evidence not in _EVIDENCE_VALUES:
             evidence = "inferred"
+        name = _safe_name(item.get("name"), f"对象 {index + 1}")
         original = list(position)
-        position[1] = min(max(position[1], -0.2), height)
         size[0] = min(size[0], width)
         size[1] = min(size[1], height * 1.5)
         size[2] = min(size[2], depth)
+        _apply_category_priors(name, category, position, size, height, warnings)
+        position[1] = min(max(position[1], 0.0), max(0.0, height - size[1]))
         normalized_yaw = ((yaw + 180.0) % 360.0) - 180.0
+        wall = str(item.get("wall") or "").strip().lower()
+        if category in _MOUNTED_CATEGORIES:
+            if wall not in _WALL_VALUES:
+                wall = _nearest_wall(position, width, depth)
+                warnings.append(f"{name} 缺少可靠墙面标记，已吸附到 {wall} 墙")
+            _attach_to_wall(wall, position, size, width, depth)
+            normalized_yaw = 0.0
+        else:
+            wall = ""
         yaw_radians = math.radians(normalized_yaw)
         footprint_x = (
             abs(math.cos(yaw_radians)) * size[0] * 0.5
@@ -243,33 +315,23 @@ def normalize_reconstruction_layout(raw, known_room_width_m=0.0, max_objects=36)
             footprint_z *= footprint_scale
             warnings.append(
                 f"{_safe_name(item.get('name'), f'对象 {index + 1}')} 占地超出房间，已缩小")
-        if category in _OPENING_CATEGORIES:
-            normalized_x = abs(position[0]) / max(width * 0.5, 0.001)
-            normalized_z = abs(position[2]) / max(depth * 0.5, 0.001)
-            if normalized_x > normalized_z:
-                position[0] = math.copysign(width * 0.5, position[0] or 1.0)
-                max_z = max(0.0, depth * 0.5 - footprint_z)
-                position[2] = min(max(position[2], -max_z), max_z)
-            else:
-                position[2] = math.copysign(depth * 0.5, position[2] or 1.0)
-                max_x = max(0.0, width * 0.5 - footprint_x)
-                position[0] = min(max(position[0], -max_x), max_x)
-        else:
+        if category not in _MOUNTED_CATEGORIES:
             max_x = max(0.0, width * 0.5 - footprint_x)
             max_z = max(0.0, depth * 0.5 - footprint_z)
             position[0] = min(max(position[0], -max_x), max_x)
             position[2] = min(max(position[2], -max_z), max_z)
         if position != original:
             warnings.append(
-                f"{_safe_name(item.get('name'), f'对象 {index + 1}')} 超出房间边界，已约束")
+                f"{name} 超出房间边界，已约束")
         color = str(item.get("color") or "")
         if not _HEX_COLOR_RE.fullmatch(color):
             color = _SEMANTIC_COLORS[category]
-        movable_default = category not in _STRUCTURAL_CATEGORIES | _OPENING_CATEGORIES
+        movable_default = category not in _STRUCTURAL_CATEGORIES | _MOUNTED_CATEGORIES
         entity = {
             "id": f"scene-object-{index + 1:02d}",
-            "name": _safe_name(item.get("name"), f"对象 {index + 1}"),
+            "name": name,
             "category": category,
+            "wall": wall,
             "primitive": "box",
             "position": position,
             "size": size,
@@ -391,6 +453,7 @@ def build_scene_documents(layout, model, request_id, image_hashes):
                 "evidence": entity["evidence"],
                 "movable": entity["movable"],
                 "collider": entity["collider"],
+                "wall": entity.get("wall", ""),
             },
         })
     scene = {

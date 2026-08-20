@@ -960,6 +960,11 @@ editable_raw = {
 }
 extracted_editable = nodes._extract_json_object(
     "```json\n" + json.dumps(editable_raw, ensure_ascii=False) + "\n```")
+editable_prompt = nodes._build_reconstruction_prompt("教室", 0, 36, "", 1)
+check("editable 3d: prompt avoids room/camera numeric anchoring",
+      '"width": 8.0' not in editable_prompt
+      and '"position": [0.0, 1.7, -7.0]' not in editable_prompt
+      and "wall must be left/right/back/front" in editable_prompt)
 normalized_editable = nodes._normalize_reconstruction_layout(
     extracted_editable, known_room_width_m=12, max_objects=12)
 check("editable 3d: known width rescales layout",
@@ -991,6 +996,37 @@ bounded_half_z = (
 check("editable 3d: rotated footprint stays inside room",
       abs(bounded_object["position"][0]) + bounded_half_x <= 4.0 + 1e-6
       and abs(bounded_object["position"][2]) + bounded_half_z <= 5.0 + 1e-6)
+prior_layout = dict(editable_raw)
+prior_layout["objects"] = [
+    {
+        "name": "table_slab", "category": "table",
+        "position": [0, 0, 0], "size": [1, 0.1, 0.6],
+        "confidence": 0.8, "evidence": "observed",
+    },
+    {
+        "name": "chair_seat", "category": "chair",
+        "position": [1, 0, 0], "size": [0.5, 0.1, 0.6],
+        "confidence": 0.8, "evidence": "observed",
+    },
+    {
+        "name": "blackboard", "category": "blackboard", "wall": "right",
+        "position": [3.5, 2.5, 0], "size": [3, 1, 2],
+        "confidence": 0.9, "evidence": "observed", "movable": False,
+    },
+]
+prior_normalized = nodes._normalize_reconstruction_layout(
+    prior_layout, known_room_width_m=0, max_objects=12)
+check("editable 3d: furniture heights use physical priors",
+      prior_normalized["objects"][0]["size"][1] == 0.75
+      and prior_normalized["objects"][1]["size"][1] == 0.85
+      and prior_normalized["objects"][0]["position"][1] == 0
+      and prior_normalized["objects"][1]["position"][1] == 0)
+check("editable 3d: boards classify and attach to declared wall",
+      prior_normalized["objects"][2]["category"] == "board"
+      and prior_normalized["objects"][2]["wall"] == "right"
+      and prior_normalized["objects"][2]["position"][0] == 4
+      and prior_normalized["objects"][2]["size"][0] <= 0.14
+      and prior_normalized["objects"][2]["movable"] is False)
 editable_scene, editable_camera, editable_manifest = nodes._build_scene_documents(
     normalized_editable, "hunyuan-vision-1.5-instruct", "req-editable", ["abc"])
 check("editable 3d: room shell and semantic objects generated",
@@ -998,6 +1034,10 @@ check("editable 3d: room shell and semantic objects generated",
       and len(editable_manifest["entities"]) == 6
       and editable_manifest["interaction_anchors"][0]["type"] == "surface"
       and editable_scene["appearance"]["export_mode"] == "semantic")
+parsed_editable_scene = nodes._parse_previs_scene(
+    json.dumps(editable_scene, ensure_ascii=False))
+check("editable 3d: semantic category survives previs parsing",
+      parsed_editable_scene["objects"][4]["semantic"]["category"] == "table")
 check("editable 3d: reference camera generated",
       editable_camera["active_camera"] == "camera-reference"
       and len(editable_camera["cameras"][0]["keyframes"]) == 2)

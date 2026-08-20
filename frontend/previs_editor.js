@@ -2658,12 +2658,49 @@ function createObjectProxy(item) {
     emissive: "#000000",
     emissiveIntensity: 0.05,
   });
-  if (item.type === "box") {
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), material());
-    mesh.position.y = 0.5;
+  const addBox = (name, size, position) => {
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(...size), material());
+    mesh.name = name;
+    mesh.position.set(...position);
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     root.add(mesh);
+    return mesh;
+  };
+  if (item.type === "box") {
+    const category = item.semantic?.category;
+    if (category === "table") {
+      addBox("tabletop", [1, 0.12, 1], [0, 0.94, 0]);
+      for (const x of [-0.42, 0.42]) {
+        for (const z of [-0.42, 0.42]) {
+          addBox("table-leg", [0.08, 0.88, 0.08], [x, 0.44, z]);
+        }
+      }
+    } else if (category === "chair") {
+      addBox("chair-seat", [1, 0.12, 1], [0, 0.5, 0]);
+      addBox("chair-back", [1, 0.48, 0.1], [0, 0.76, 0.45]);
+      for (const x of [-0.42, 0.42]) {
+        for (const z of [-0.4, 0.4]) {
+          addBox("chair-leg", [0.08, 0.44, 0.08], [x, 0.22, z]);
+        }
+      }
+    } else if (category === "window") {
+      if (["left", "right"].includes(item.semantic?.wall)) {
+        addBox("window-pane", [0.08, 0.88, 0.88], [0, 0.5, 0]);
+        addBox("window-frame-top", [0.12, 0.08, 1], [0, 0.96, 0]);
+        addBox("window-frame-bottom", [0.12, 0.08, 1], [0, 0.04, 0]);
+        addBox("window-frame-left", [0.12, 0.84, 0.08], [0, 0.5, -0.46]);
+        addBox("window-frame-right", [0.12, 0.84, 0.08], [0, 0.5, 0.46]);
+      } else {
+        addBox("window-pane", [0.88, 0.88, 0.08], [0, 0.5, 0]);
+        addBox("window-frame-top", [1, 0.08, 0.12], [0, 0.96, 0]);
+        addBox("window-frame-bottom", [1, 0.08, 0.12], [0, 0.04, 0]);
+        addBox("window-frame-left", [0.08, 0.84, 0.12], [-0.46, 0.5, 0]);
+        addBox("window-frame-right", [0.08, 0.84, 0.12], [0.46, 0.5, 0]);
+      }
+    } else {
+      addBox("box", [1, 1, 1], [0, 0.5, 0]);
+    }
   } else if (item.type === "sphere") {
     const mesh = new THREE.Mesh(new THREE.SphereGeometry(0.5, 24, 16), material());
     mesh.position.y = 0.5;
