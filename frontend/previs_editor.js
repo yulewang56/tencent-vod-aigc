@@ -2218,6 +2218,7 @@ function createObjectProxy(item, color) {
     roughness: 0.72,
     metalness: 0.02,
     emissive: color("--cp-bg"),
+    emissiveIntensity: 0.05,
   });
   if (item.type === "box") {
     const mesh = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), material());
