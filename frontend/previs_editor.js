@@ -1172,6 +1172,7 @@ function openEditor(node) {
     workspaceMode: "director",
     sideTab: assetWidget?.value ? "selection" : "scene",
     pathTool: null,
+    directorTool: "select",
     toolMessage: "选择人物或摄影机后，可手绘或逐点创建运动轨迹",
     transformMode: "translate",
     showGrid: true,
@@ -1278,6 +1279,7 @@ function openEditor(node) {
     if (event.key === "Escape") {
       if (runtime?.cancelPathDrawing?.()) {
         state.pathTool = null;
+        state.directorTool = "select";
         state.toolMessage = "已取消轨迹绘制";
         state.refreshTools?.();
         return;
@@ -1286,6 +1288,7 @@ function openEditor(node) {
     }
     if (event.key === "Enter" && runtime?.finishPathDrawing?.()) {
       state.pathTool = null;
+      state.directorTool = "select";
       state.toolMessage = "轨迹已生成，可拖动控制点继续调整";
       state.refreshTools?.();
     }
@@ -1361,17 +1364,6 @@ function openEditor(node) {
     });
     control.dataset.active = String(view === "perspective");
     viewButtons.push(control);
-    toolbar.appendChild(control);
-  }
-  const modeButtons = [];
-  for (const [label, mode] of [["移动", "translate"], ["旋转", "rotate"], ["缩放", "scale"]]) {
-    const control = button(label, () => {
-      state.transformMode = mode;
-      runtime.setTransformMode(mode);
-      modeButtons.forEach((item) => { item.dataset.active = String(item === control); });
-    });
-    control.dataset.active = String(mode === state.transformMode);
-    modeButtons.push(control);
     toolbar.appendChild(control);
   }
   const gridButton = button("网格", () => {
@@ -1679,6 +1671,7 @@ function createThreeRuntime(mainHost, monitorHost, state, onManipulated) {
       } else {
         if (event.detail >= 2 && finishPathDrawing()) {
           state.pathTool = null;
+          state.directorTool = "select";
           state.toolMessage = "轨迹已生成，可拖动控制点继续调整";
           state.refreshTools?.();
         } else {
@@ -1741,6 +1734,7 @@ function createThreeRuntime(mainHost, monitorHost, state, onManipulated) {
     mainRenderer.domElement.releasePointerCapture?.(event.pointerId);
     if (finishPathDrawing()) {
       state.pathTool = null;
+      state.directorTool = "select";
       state.toolMessage = "轨迹已生成，可拖动控制点继续调整";
       state.refreshTools?.();
     }
@@ -2716,19 +2710,21 @@ function renderDirectorTools(container, state, runtime) {
   };
   addTool("选择", () => {
     state.pathTool = null;
+    state.directorTool = "select";
     runtime.cancelPathDrawing?.();
     state.toolMessage = "选择场景中的人物、物体、轨迹点或摄影机控制点";
     state.refreshTools?.();
-  }, !state.pathTool, "选择对象和控制点");
+  }, !state.pathTool && state.directorTool === "select", "选择对象和控制点");
   for (const [label, mode] of [["移动", "translate"], ["旋转", "rotate"], ["缩放", "scale"]]) {
     addTool(label, () => {
       state.pathTool = null;
+      state.directorTool = mode;
       runtime.cancelPathDrawing?.();
       state.transformMode = mode;
       runtime.setTransformMode(mode);
       state.toolMessage = `${label}模式`;
       state.refreshTools?.();
-    }, !state.pathTool && state.transformMode === mode, `${label}所选对象`);
+    }, !state.pathTool && state.directorTool === mode, `${label}所选对象`);
   }
   container.appendChild(element("div", "vod-previs__tool-separator"));
   addTool("+ 人物", () => addSceneObject(state, runtime, "actor"), false, "添加人物简模");
@@ -2743,12 +2739,14 @@ function renderDirectorTools(container, state, runtime) {
     addTool("完成轨迹", () => {
       if (!runtime.finishPathDrawing?.()) return;
       state.pathTool = null;
+      state.directorTool = "select";
       state.toolMessage = "轨迹已生成，可拖动控制点继续调整";
       state.refreshTools?.();
     }, false, "完成当前轨迹");
     addTool("取消绘制", () => {
       runtime.cancelPathDrawing?.();
       state.pathTool = null;
+      state.directorTool = "select";
       state.toolMessage = "已取消轨迹绘制";
       state.refreshTools?.();
     }, false, "取消当前轨迹");
@@ -2766,6 +2764,7 @@ function activatePathTool(state, runtime, mode) {
   }
   state.workspaceMode = "director";
   state.pathTool = mode;
+  state.directorTool = mode;
   runtime.setPathDrawingMode?.(mode);
   state.toolMessage = mode === "freehand"
     ? "手绘轨迹：按住鼠标左键绘制，松开后自动生成关键帧"
