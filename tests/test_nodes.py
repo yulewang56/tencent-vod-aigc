@@ -101,6 +101,8 @@ check("previs: legacy widget order preserved",
           "scene_json", "camera_json", "frame_count", "width", "height"]
       and list(previs_inputs["optional"])[:3] == [
           "background_asset", "background_asset_path", "show_overlay"])
+check("previs: extended timeline frame limit",
+      previs_inputs["required"]["frame_count"][1]["max"] == 240)
 check("previs: legacy outputs remain prefix",
       nodes.TencentVOD3DPrevis.RETURN_NAMES[:4]
       == ("frames", "camera_plan", "scene_plan", "reference_prompt"))

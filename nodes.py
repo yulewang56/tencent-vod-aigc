@@ -1680,8 +1680,8 @@ def _register_http_routes():
             width = int(body.get("width"))
             height = int(body.get("height"))
             fps = float(body.get("fps"))
-            if not 2 <= frame_count <= 120:
-                raise ValueError("frame_count 必须在 2-120 之间")
+            if not 2 <= frame_count <= 240:
+                raise ValueError("frame_count 必须在 2-240 之间")
             if not 256 <= width <= 1280 or not 144 <= height <= 720:
                 raise ValueError("渲染尺寸超出预演台允许范围")
             if not 1 <= fps <= 120:
@@ -2793,8 +2793,8 @@ class TencentVOD3DPrevis:
                                       "tooltip": "点击节点上的“打开 3D 预演编辑器”可视化编辑"}),
             "camera_json": ("STRING", {"multiline": True, "default": _DEFAULT_PREVIS_CAMERA,
                                        "tooltip": "多摄影机、归一化时间 0-1 关键帧与切镜计划；兼容旧版单摄影机 JSON"}),
-            "frame_count": ("INT", {"default": 48, "min": 2, "max": 120, "step": 1,
-                                    "tooltip": "输出帧数；同时生成原生 VIDEO"}),
+            "frame_count": ("INT", {"default": 48, "min": 2, "max": 240, "step": 1,
+                                    "tooltip": "输出帧数，最多 240 帧；同时生成原生 VIDEO"}),
             "width": ("INT", {"default": 768, "min": 256, "max": 1280, "step": 16}),
             "height": ("INT", {"default": 432, "min": 144, "max": 720, "step": 16}),
         }

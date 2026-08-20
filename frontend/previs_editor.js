@@ -11,6 +11,7 @@ const NODE_TYPE = "TencentVOD3DPrevis";
 const STYLE_ID = "tencent-vod-previs-style";
 const EPSILON = 1e-6;
 const MAX_CAMERAS = 8;
+const MAX_PREVIS_FRAMES = 240;
 const PREVIS_REQUEST_HEADER = { "X-Tencent-VOD-AIGC": "previs" };
 const TRACK_INTERPOLATIONS = ["linear", "catmull_rom", "bezier"];
 const SPEED_MODES = ["keyframed", "constant", "ease_in", "ease_out", "ease_in_out", "custom"];
@@ -577,7 +578,7 @@ html[data-theme="dark"] {
   min-height: 208px;
   max-height: 32vh;
   display: grid;
-  grid-template-columns: 190px minmax(0, 1fr);
+  grid-template-columns: 240px minmax(0, 1fr);
   grid-template-rows: 42px minmax(0, 1fr);
   overflow: hidden;
   background: var(--cp-surface);
@@ -593,6 +594,17 @@ html[data-theme="dark"] {
   border-right: 1px solid var(--cp-border);
   border-bottom: 1px solid var(--cp-border);
 }
+.vod-previs__timeline-number {
+  width: 48px;
+  min-height: 28px;
+  padding: 3px 4px;
+}
+.vod-previs__timing-field {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}
 .vod-previs__ruler {
   position: relative;
   border-bottom: 1px solid var(--cp-border);
@@ -606,10 +618,17 @@ html[data-theme="dark"] {
   top: 5px;
   display: flex;
   gap: 4px;
+  align-items: center;
 }
 .vod-previs__timeline-actions .vod-previs__button {
   min-height: 28px;
   padding: 4px 7px;
+}
+.vod-previs__timeline-help {
+  margin-left: 3px;
+  color: var(--cp-text-muted);
+  font-size: 10px;
+  white-space: nowrap;
 }
 .vod-previs__ruler-ticks {
   position: absolute;
@@ -674,7 +693,8 @@ html[data-theme="dark"] {
   padding: 0;
   background: var(--cp-link);
   border: 1px solid var(--cp-surface);
-  cursor: pointer;
+  cursor: ew-resize;
+  touch-action: none;
 }
 .vod-previs__marker--cut { background: var(--cp-warning); }
 .vod-previs__marker[data-active="true"] { background: var(--cp-accent); }
@@ -1067,6 +1087,16 @@ function syncCameraTracks(camera) {
   );
 }
 
+function moveCameraKeyframeTime(camera, frame, nextTime) {
+  const previousTime = frame.time;
+  for (const track of [camera.position_track, camera.target_track]) {
+    const trackPoint = track?.points?.find(
+      (point) => Math.abs(point.time - previousTime) < EPSILON);
+    if (trackPoint) trackPoint.time = nextTime;
+  }
+  frame.time = nextTime;
+}
+
 function syncCameraLegacy(camera) {
   const previousFrames = Array.isArray(camera.keyframes) ? camera.keyframes : [];
   const times = new Set([
@@ -1266,12 +1296,18 @@ function openEditor(node) {
   const transformWidget = widget(node, "background_transform");
   const taskIdWidget = widget(node, "generated_task_id");
   const renderCacheWidget = widget(node, "render_cache_path");
+  const fpsWidget = widget(node, "fps");
+  const frameCountWidget = widget(node, "frame_count");
   const widthWidget = widget(node, "width");
   const heightWidget = widget(node, "height");
   const scene = normalizeScene(safeJson(sceneWidget?.value, DEFAULT_SCENE));
   const cameraRig = normalizeCameraRig(safeJson(cameraWidget?.value, DEFAULT_CAMERA));
-  const fps = clamp(finite(widget(node, "fps")?.value, 24), 1, 120);
-  const frameCount = clamp(Math.round(finite(widget(node, "frame_count")?.value, 48)), 2, 120);
+  const fps = clamp(finite(fpsWidget?.value, 24), 1, 120);
+  const frameCount = clamp(
+    Math.round(finite(frameCountWidget?.value, 48)),
+    2,
+    MAX_PREVIS_FRAMES,
+  );
   const duration = frameCount / fps;
   const state = {
     scene,
@@ -1297,6 +1333,7 @@ function openEditor(node) {
     showGrid: true,
     disposed: false,
     exporting: false,
+    timelineDragging: false,
     background: {
       source: String(sceneSourceWidget?.value || (assetWidget?.value ? "Local Asset" : "Blank")),
       path: String(assetWidget?.value || ""),
@@ -1399,6 +1436,8 @@ function openEditor(node) {
     setWidgetValue(node, transformWidget, JSON.stringify(state.background.transform));
     setWidgetValue(node, taskIdWidget, state.background.taskId);
     setWidgetValue(node, renderCacheWidget, state.renderCachePath);
+    setWidgetValue(node, fpsWidget, state.fps);
+    setWidgetValue(node, frameCountWidget, state.frameCount);
   };
   const applyHistoryAction = (direction) => {
     if (!history || state.exporting) return false;
@@ -1583,7 +1622,27 @@ function openEditor(node) {
   };
 
   state.refreshTabs = () => renderCameraTabs(tabs, state, runtime, monitorLabel);
-  state.refreshInspector = () => renderSidePanel(sideContent, state, runtime);
+  const inspectorScroll = new Map();
+  let renderedInspectorKey = null;
+  state.refreshInspector = () => {
+    if (renderedInspectorKey) {
+      inspectorScroll.set(renderedInspectorKey, {
+        top: sideContent.scrollTop,
+        left: sideContent.scrollLeft,
+      });
+    }
+    const selectedId = state.selectedKind === "object"
+      ? state.selectedObjectId
+      : state.selectedCameraId;
+    const nextKey = state.sideTab === "scene"
+      ? "scene"
+      : `${state.sideTab}:${state.selectedKind}:${selectedId || ""}`;
+    renderSidePanel(sideContent, state, runtime);
+    const position = inspectorScroll.get(nextKey);
+    sideContent.scrollTop = position?.top || 0;
+    sideContent.scrollLeft = position?.left || 0;
+    renderedInspectorKey = nextKey;
+  };
   state.refreshTimeline = () => timeline.render();
   state.refreshInspectorTabs = () => renderInspectorTabs(
     inspectorTabs,
@@ -2661,18 +2720,33 @@ function buildTimeline(state) {
     state.playing = !state.playing;
     render();
   });
-  const info = textElement(
-    "span",
-    "",
-    `${state.frameCount} 帧 · ${state.fps} FPS · ${state.duration.toFixed(2)}s`,
-  );
-  transport.append(play, info);
+  const durationInput = element("input", "vod-previs__input vod-previs__timeline-number");
+  durationInput.type = "number";
+  durationInput.min = "0.1";
+  durationInput.step = "0.1";
+  durationInput.setAttribute("aria-label", "时间轴时长（秒）");
+  const fpsInput = element("input", "vod-previs__input vod-previs__timeline-number");
+  fpsInput.type = "number";
+  fpsInput.min = "1";
+  fpsInput.max = "120";
+  fpsInput.step = "1";
+  fpsInput.setAttribute("aria-label", "时间轴帧率");
+  const durationField = element("label", "vod-previs__timing-field");
+  durationField.append("时长", durationInput, "s");
+  const fpsField = element("label", "vod-previs__timing-field");
+  fpsField.append("FPS", fpsInput);
+  transport.append(play, durationField, fpsField);
   const ruler = element("div", "vod-previs__ruler");
   const rulerTicks = element("div", "vod-previs__ruler-ticks");
   const actions = element("div", "vod-previs__timeline-actions");
   actions.append(
     button("+ 轨迹点", () => addTimelinePoint(state)),
     button("+ CUT", () => addTimelineCut(state)),
+    textElement(
+      "span",
+      "vod-previs__timeline-help",
+      "点击轨道定位 · 拖动菱形修改时间",
+    ),
   );
   const readout = textElement("div", "vod-previs__time-readout", "");
   const rulerPlayhead = element("div", "vod-previs__playhead");
@@ -2697,11 +2771,46 @@ function buildTimeline(state) {
     render();
   };
   ruler.addEventListener("pointerdown", (event) => {
-    if (event.target === ruler) scrub(event, ruler);
+    if (event.target.closest(".vod-previs__timeline-actions")) return;
+    scrub(event, ruler);
+  });
+
+  const applyTiming = (requestedDuration, requestedFps) => {
+    const nextFps = clamp(finite(requestedFps, state.fps), 1, 120);
+    const nextFrameCount = clamp(
+      Math.round(Math.max(0.1, finite(requestedDuration, state.duration)) * nextFps),
+      2,
+      MAX_PREVIS_FRAMES,
+    );
+    if (nextFps === state.fps && nextFrameCount === state.frameCount) {
+      render();
+      return;
+    }
+    state.fps = nextFps;
+    state.frameCount = nextFrameCount;
+    state.duration = nextFrameCount / nextFps;
+    invalidateRenderCache(state);
+    state.history?.checkpoint();
+    render();
+  };
+  durationInput.addEventListener("change", () => {
+    applyTiming(durationInput.value, fpsInput.value);
+  });
+  fpsInput.addEventListener("change", () => {
+    applyTiming(durationInput.value, fpsInput.value);
   });
 
   function render() {
+    const labelScrollTop = labels.scrollTop;
+    const labelScrollLeft = labels.scrollLeft;
+    const trackScrollTop = tracks.scrollTop;
+    const trackScrollLeft = tracks.scrollLeft;
     play.textContent = state.playing ? "暂停" : "播放";
+    durationInput.max = String(MAX_PREVIS_FRAMES / state.fps);
+    durationInput.value = state.duration.toFixed(2);
+    durationInput.title = `最多 ${MAX_PREVIS_FRAMES} 帧；当前 ${state.frameCount} 帧`;
+    fpsInput.value = String(state.fps);
+    fpsInput.title = `当前 ${state.frameCount} 帧；提高 FPS 会缩短可用最大时长`;
     const frame = Math.min(state.frameCount - 1, Math.floor(state.time * state.frameCount));
     readout.textContent = `${(state.time * state.duration).toFixed(2)}s · F${frame}`;
     rulerPlayhead.style.left = `${state.time * 100}%`;
@@ -2754,6 +2863,10 @@ function buildTimeline(state) {
           state.refreshInspector?.();
           state.rebuildScene?.();
         },
+        commitPoint: (point) => {
+          syncObjectLegacy(item);
+          state.selectedPointIndex = item.motion_track.points.indexOf(point);
+        },
       });
     }
     for (const camera of state.cameraRig.cameras) {
@@ -2799,6 +2912,13 @@ function buildTimeline(state) {
           state.time = camera.keyframes[index].time;
           state.refreshInspector?.();
           state.rebuildScene?.();
+        },
+        commitPoint: (point) => {
+          syncCameraTracks(camera);
+          state.selectedKeyframe = camera.keyframes.indexOf(point);
+        },
+        movePoint: (point, nextTime) => {
+          moveCameraKeyframeTime(camera, point, nextTime);
         },
       });
       if (camera.look_at_object_id) {
@@ -2863,7 +2983,7 @@ function buildTimeline(state) {
       playhead.style.left = `${state.time * 100}%`;
       track.appendChild(playhead);
       track.addEventListener("pointerdown", (event) => {
-        if (event.target !== track) return;
+        if (event.target.closest(".vod-previs__marker, .vod-previs__clip")) return;
         scrub(event, track);
       });
       for (const clip of row.clips || []) {
@@ -2892,8 +3012,67 @@ function buildTimeline(state) {
           "aria-label",
           `${row.label} ${(point.time * state.duration).toFixed(2)}s`,
         );
+        marker.title = "拖动修改关键帧时间；点击后可在右侧精确编辑";
+        let dragged = false;
+        marker.addEventListener("pointerdown", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          dragged = false;
+          state.playing = false;
+          state.timelineDragging = true;
+          row.select(index);
+          marker.setPointerCapture(event.pointerId);
+          const rect = track.getBoundingClientRect();
+          const move = (moveEvent) => {
+            const requested = clamp(
+              (moveEvent.clientX - rect.left) / Math.max(1, rect.width),
+              0,
+              1,
+            );
+            if (Math.abs(requested - point.time) > 0.001) dragged = true;
+            if (!dragged) return;
+            const nextTime = uniqueTime(row.points, point, requested);
+            if (row.movePoint) row.movePoint(point, nextTime);
+            else point.time = nextTime;
+            state.time = point.time;
+            marker.style.left = `${point.time * 100}%`;
+            marker.setAttribute(
+              "aria-label",
+              `${row.label} ${(point.time * state.duration).toFixed(2)}s`,
+            );
+            readout.textContent = `${(state.time * state.duration).toFixed(2)}s · F${
+              Math.min(state.frameCount - 1, Math.floor(state.time * state.frameCount))
+            }`;
+            rulerPlayhead.style.left = `${state.time * 100}%`;
+            tracks.querySelectorAll(".vod-previs__playhead").forEach((item) => {
+              item.style.left = `${state.time * 100}%`;
+            });
+          };
+          const finish = () => {
+            marker.removeEventListener("pointermove", move);
+            marker.removeEventListener("pointerup", finish);
+            marker.removeEventListener("pointercancel", finish);
+            marker.removeEventListener("lostpointercapture", finish);
+            state.timelineDragging = false;
+            if (!dragged) return;
+            row.commitPoint?.(point);
+            invalidateRenderCache(state);
+            state.rebuildScene?.();
+            state.history?.checkpoint();
+            state.refreshInspector?.();
+            render();
+          };
+          marker.addEventListener("pointermove", move);
+          marker.addEventListener("pointerup", finish);
+          marker.addEventListener("pointercancel", finish);
+          marker.addEventListener("lostpointercapture", finish);
+        });
         marker.addEventListener("click", (event) => {
           event.stopPropagation();
+          if (dragged) {
+            dragged = false;
+            return;
+          }
           row.select(index);
           render();
         });
@@ -2901,6 +3080,10 @@ function buildTimeline(state) {
       });
       tracks.appendChild(track);
     });
+    labels.scrollTop = labelScrollTop;
+    labels.scrollLeft = labelScrollLeft;
+    tracks.scrollTop = trackScrollTop;
+    tracks.scrollLeft = trackScrollLeft;
   }
   return { root, render };
 }
@@ -3313,6 +3496,11 @@ function renderSceneSourcePanel(container, state, runtime) {
     promptField.appendChild(prompt);
     details.appendChild(promptField);
     const uploads = element("div", "vod-previs__upload-grid");
+    const uploadLabels = [
+      ["主参考图", "正面 / 主构图"],
+      ["补充视图 2", "同一空间侧面"],
+      ["补充视图 3", "同一空间反向"],
+    ];
     state.generation.images.forEach((file, index) => {
       const label = element("label", "vod-previs__upload");
       const input = document.createElement("input");
@@ -3324,12 +3512,17 @@ function renderSceneSourcePanel(container, state, runtime) {
       });
       label.append(
         input,
-        textElement("div", "", file ? file.name : `参考图 ${index + 1}`),
-        textElement("div", "", file ? "点击替换" : "点击选择"),
+        textElement("div", "", file ? file.name : uploadLabels[index][0]),
+        textElement("div", "", file ? "点击替换" : uploadLabels[index][1]),
       );
       uploads.appendChild(label);
     });
     details.appendChild(uploads);
+    details.appendChild(textElement(
+      "div",
+      "vod-previs__hint",
+      "这是生成式 3D 世界（常见输出为 3DGS/SPZ），不是按单张图片精确反求 CAD/可编辑网格。单图主要保证参考视角附近；要减少侧面拉伸和遮挡区域幻觉，请提供同一空间 2-3 个视角，并在描述中写清布局、尺寸关系、门窗位置和相机方向。",
+    ));
     details.appendChild(selectInput(
       "存储模式",
       ["Temporary", "Permanent"],
@@ -4047,6 +4240,10 @@ function previsHistoryEntry(state) {
     scene: structuredClone(state.scene),
     cameraRig: structuredClone(state.cameraRig),
     background: structuredClone(state.background),
+    timing: {
+      fps: state.fps,
+      frameCount: state.frameCount,
+    },
   };
   return { snapshot, key: JSON.stringify(snapshot) };
 }
@@ -4061,6 +4258,10 @@ function previsExportStateKey(state) {
     scene,
     cameraRig: state.cameraRig,
     background: state.background,
+    timing: {
+      fps: state.fps,
+      frameCount: state.frameCount,
+    },
   });
 }
 
@@ -4102,6 +4303,7 @@ function createPrevisHistory(state, restore, onChange) {
       return commit();
     },
     observe(now) {
+      if (state.timelineDragging) return;
       if (now - lastObservedAt < 120) return;
       lastObservedAt = now;
       const current = previsHistoryEntry(state);
@@ -4158,6 +4360,13 @@ function restorePrevisHistory(state, snapshot, runtime) {
   state.scene = normalizeScene(snapshot.scene);
   state.cameraRig = normalizeCameraRig(snapshot.cameraRig);
   state.background = nextBackground;
+  state.fps = clamp(finite(snapshot.timing?.fps, state.fps), 1, 120);
+  state.frameCount = clamp(
+    Math.round(finite(snapshot.timing?.frameCount, state.frameCount)),
+    2,
+    MAX_PREVIS_FRAMES,
+  );
+  state.duration = state.frameCount / state.fps;
   if (previousExportState !== previsExportStateKey(state)) state.renderCachePath = "";
   state.selectedObjectId = state.scene.objects.some(
     (item) => item.id === state.selectedObjectId)

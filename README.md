@@ -192,7 +192,11 @@ cp tencent-vod-config.example.json tencent-vod-config.json
 - 支持最多 8 台摄影机方案：新增、复制、重命名、切换和删除；每台摄影机拥有独立的
   Position / Look At / FOV / Roll 关键帧，并可在底部时间线上添加切镜点
 - 底部导演时间线按人物动作、空间轨迹、摄影机运镜、Look At 与 CUT 分层显示，使用秒数和语义
-  片段作为默认视图；展开后的关键帧仍沿用原有 V3 track 数据，可继续精确编辑
+  片段作为默认视图；可直接点击轨道定位播放头、横向拖动菱形关键帧修改时间，重绘时会保留轨道
+  与当前对象属性面板的滚动位置
+- 时间线左上角可直接修改时长和 FPS，并实时换算输出帧数；最长受 240 帧安全上限约束，例如
+  24 FPS 可编辑至 10 秒。更长镜头可降低 FPS 或拆分镜头，避免 ComfyUI `IMAGE` batch 占用
+  过多内存；保存到节点时会同步更新 `frame_count / fps`
 - 预演台提供最多 100 步场景级撤销/重做，覆盖路径点、对象、摄影机、CUT、背景变换和视觉样式；
   macOS 使用 `Command+Z / Command+Shift+Z`，Windows / Linux 使用
   `Ctrl+Z / Ctrl+Shift+Z`（也支持 `Ctrl+Y`）。焦点不在输入框时，`Delete / Backspace`
@@ -205,6 +209,10 @@ cp tencent-vod-config.example.json tencent-vod-config.json
   缓存包含 SPZ、人物、其他场景物体和当前导出视觉样式。节点执行时校验场景/相机/外观快照，
   修改后未重新渲染会明确报错，防止静默输出旧视频；没有浏览器缓存时，Python 兜底渲染也会应用
   天空、地面、网格、人物、道具和对象覆盖色
+- 混元 `3d_scene` 属于生成式 3D 世界补全，常见 SPZ/3DGS 输出并不是单图摄影测量、CAD 或可编辑
+  mesh 精确重建：单图通常只在参考视角附近稳定，遮挡区和侧后方由模型推断。需要空间一致性时，
+  建议上传同一场景 2-3 个方向明确、光照一致的视图，并在 Prompt 写明布局、尺寸关系、门窗位置
+  与相机方向
 - `scene_path` 仍可写入 `background_asset_path`，`scene_3d` 仍可连接 `background_asset` 供节点
   执行使用；由于 ComfyUI 前端无法在打开编辑器时读取尚未执行的上游值，交互预览推荐在场景来源
   面板中直接生成，或填写已经存在的本地路径
