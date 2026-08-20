@@ -180,6 +180,10 @@ cp tencent-vod-config.example.json tencent-vod-config.json
   继续使用 Three.js loader。背景支持 Position、Rotation（度）、统一 Scale 和按边界居中落地
 - 主视窗支持透视/顶/前/侧视图、Orbit 浏览、TransformControls 和轨迹控制点拖拽；人物或摄影机
   可使用「手绘轨迹」连续绘制曲线，或使用「逐点轨迹」精确设置转折点，完成后自动生成时间关键帧
+- 场景「预演视觉样式」提供导演柔和、高对比语义和中性白模预设；天空、地面、网格、人物与道具
+  可分别配色，多人物可自动获得跨帧、跨机位稳定的高对比颜色，每个对象也可覆盖颜色和不透明度
+- 编辑器显示可在带光照材质、无光照语义色和线框检查间切换；镜头输出另行选择导演预览或
+  `Object-ID` 风格的 AI 语义参考，因此导演查看方式不会意外改变导出用途
 - 摄影机可从当前导演视角直接创建或更新，并可将 Look At 持续绑定到某个人物/物体；右上角
   镜头观察窗可独立选择摄影机或跟随当前 CUT
 - 对象和摄影机 Position / Look At 轨迹支持 `linear`、`catmull_rom`、`bezier`，速度支持
@@ -194,8 +198,9 @@ cp tencent-vod-config.example.json tencent-vod-config.json
 - 节点输出 `IMAGE` batch 和原生 `VIDEO`；`fps` 控制帧率，启用 `export_video` 后同时写出 MP4，
   可直接连接 ComfyUI `Save Video` 或支持视频输入的下游节点，不再依赖 VideoHelperSuite
 - 点击编辑器底部「渲染镜头输出」会严格按 frame_count/fps 和 cuts 逐帧渲染右上角摄影机；
-  缓存包含 SPZ、人物和其他场景物体。节点执行时校验场景/相机快照，修改后未重新渲染会明确报错，
-  防止静默输出旧视频
+  缓存包含 SPZ、人物、其他场景物体和当前导出视觉样式。节点执行时校验场景/相机/外观快照，
+  修改后未重新渲染会明确报错，防止静默输出旧视频；没有浏览器缓存时，Python 兜底渲染也会应用
+  天空、地面、网格、人物、道具和对象覆盖色
 - `scene_path` 仍可写入 `background_asset_path`，`scene_3d` 仍可连接 `background_asset` 供节点
   执行使用；由于 ComfyUI 前端无法在打开编辑器时读取尚未执行的上游值，交互预览推荐在场景来源
   面板中直接生成，或填写已经存在的本地路径

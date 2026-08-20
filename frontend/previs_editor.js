@@ -28,8 +28,54 @@ const DEFAULT_TRACK = {
   speed_curve: [{ x: 0, y: 0 }, { x: 1, y: 1 }],
 };
 
+const DEFAULT_APPEARANCE = {
+  preset: "director",
+  preview_mode: "director",
+  export_mode: "semantic",
+  sky_color: "#d9e7f2",
+  ground_color: "#c9c3b8",
+  grid_color: "#788491",
+  actor_color: "#d45d79",
+  prop_color: "#6f7f91",
+  auto_actor_colors: true,
+  actor_palette: [
+    "#d94f70", "#3978d4", "#2b9a78", "#e18335",
+    "#8a5cc7", "#168fa3", "#b05d2e", "#65722e",
+  ],
+  ground_visible: true,
+};
+
+const APPEARANCE_PRESETS = {
+  director: DEFAULT_APPEARANCE,
+  contrast: {
+    ...DEFAULT_APPEARANCE,
+    preset: "contrast",
+    sky_color: "#eef3f7",
+    ground_color: "#d2d7dd",
+    grid_color: "#68727d",
+    actor_color: "#e60049",
+    prop_color: "#0057b8",
+    actor_palette: [
+      "#e60049", "#0057b8", "#00a676", "#f28e2b",
+      "#8f5bd7", "#00a6b2", "#d64a00", "#6b7a00",
+    ],
+  },
+  neutral: {
+    ...DEFAULT_APPEARANCE,
+    preset: "neutral",
+    export_mode: "director",
+    sky_color: "#e7ebef",
+    ground_color: "#c7ccd2",
+    grid_color: "#858e98",
+    actor_color: "#9aa4af",
+    prop_color: "#727d89",
+    auto_actor_colors: false,
+  },
+};
+
 const DEFAULT_SCENE = {
   version: 3,
+  appearance: DEFAULT_APPEARANCE,
   objects: [{
     id: "actor-1",
     name: "主角",
@@ -38,6 +84,7 @@ const DEFAULT_SCENE = {
     end: [1.5, 0, 0],
     scale: [1, 1, 1],
     motion: "walk",
+    appearance: { color: "", opacity: 1 },
   }],
 };
 
@@ -427,6 +474,32 @@ html[data-theme="dark"] {
 }
 .vod-previs__textarea { min-height: 58px; resize: vertical; }
 .vod-previs__vec { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
+.vod-previs__color-row {
+  align-items: center;
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 6px;
+}
+.vod-previs__color {
+  width: 42px;
+  height: 30px;
+  padding: 2px;
+  background: var(--cp-bg-elevated);
+  border: 1px solid var(--cp-border);
+  border-radius: 7px;
+  cursor: pointer;
+}
+.vod-previs__appearance {
+  border-bottom: 1px solid var(--cp-border);
+  padding: 10px 12px;
+}
+.vod-previs__appearance summary {
+  color: var(--cp-text);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+  margin-bottom: 8px;
+}
 .vod-previs__hint {
   padding: 7px 8px;
   color: var(--cp-text-muted);
@@ -760,6 +833,50 @@ function normalizeTrack(track, fallbackPoints) {
   };
 }
 
+function normalizeHexColor(value, fallback = "") {
+  const color = String(value || fallback).toLowerCase();
+  return /^#[0-9a-f]{6}$/.test(color) ? color : fallback;
+}
+
+function normalizeAppearance(value) {
+  const source = value && typeof value === "object" ? value : {};
+  const palette = Array.isArray(source.actor_palette)
+    ? source.actor_palette
+      .map((color) => normalizeHexColor(color))
+      .filter(Boolean)
+      .slice(0, 16)
+    : [];
+  return {
+    preset: String(source.preset || DEFAULT_APPEARANCE.preset),
+    preview_mode: ["director", "semantic", "wireframe"].includes(source.preview_mode)
+      ? source.preview_mode
+      : DEFAULT_APPEARANCE.preview_mode,
+    export_mode: ["director", "semantic"].includes(source.export_mode)
+      ? source.export_mode
+      : DEFAULT_APPEARANCE.export_mode,
+    sky_color: normalizeHexColor(source.sky_color, DEFAULT_APPEARANCE.sky_color),
+    ground_color: normalizeHexColor(source.ground_color, DEFAULT_APPEARANCE.ground_color),
+    grid_color: normalizeHexColor(source.grid_color, DEFAULT_APPEARANCE.grid_color),
+    actor_color: normalizeHexColor(source.actor_color, DEFAULT_APPEARANCE.actor_color),
+    prop_color: normalizeHexColor(source.prop_color, DEFAULT_APPEARANCE.prop_color),
+    auto_actor_colors: typeof source.auto_actor_colors === "boolean"
+      ? source.auto_actor_colors
+      : DEFAULT_APPEARANCE.auto_actor_colors,
+    actor_palette: palette.length ? palette : [...DEFAULT_APPEARANCE.actor_palette],
+    ground_visible: typeof source.ground_visible === "boolean"
+      ? source.ground_visible
+      : DEFAULT_APPEARANCE.ground_visible,
+  };
+}
+
+function normalizeObjectAppearance(value) {
+  const source = value && typeof value === "object" ? value : {};
+  return {
+    color: normalizeHexColor(source.color),
+    opacity: clamp(finite(source.opacity, 1), 0.05, 1),
+  };
+}
+
 function normalizeScene(rawValue) {
   const raw = rawValue && typeof rawValue === "object" && !Array.isArray(rawValue)
     ? rawValue
@@ -768,6 +885,7 @@ function normalizeScene(rawValue) {
   return {
     ...raw,
     version: 3,
+    appearance: normalizeAppearance(raw.appearance),
     objects: objects.map((item, index) => {
       const source = item && typeof item === "object" ? item : {};
       const position = vec3(source.position);
@@ -785,6 +903,7 @@ function normalizeScene(rawValue) {
         rotation: vec3(source.rotation),
         motion: String(source.motion || "static"),
         motion_track: motionTrack,
+        appearance: normalizeObjectAppearance(source.appearance),
       };
       syncObjectLegacy(normalized);
       return normalized;
@@ -1199,6 +1318,7 @@ function openEditor(node) {
     refreshTabs: null,
     refreshTools: null,
     refreshInspectorTabs: null,
+    refreshAppearanceToolbar: null,
     rebuildScene: null,
     loadBackground: null,
   };
@@ -1373,6 +1493,29 @@ function openEditor(node) {
   });
   gridButton.dataset.active = "true";
   toolbar.append(gridButton, button("适配", () => runtime.fitView()), element("span", "vod-previs__toolbar-spacer"));
+  const appearanceButtons = [];
+  for (const [label, mode] of [
+    ["材质", "director"],
+    ["语义色", "semantic"],
+    ["线框", "wireframe"],
+  ]) {
+    const control = button(label, () => {
+      state.scene.appearance.preview_mode = mode;
+      state.scene.appearance.preset = "custom";
+      runtime.applyAppearance();
+      state.refreshAppearanceToolbar?.();
+      if (state.sideTab === "scene") state.refreshInspector?.();
+    });
+    control.dataset.appearanceMode = mode;
+    appearanceButtons.push(control);
+    toolbar.appendChild(control);
+  }
+  state.refreshAppearanceToolbar = () => {
+    for (const control of appearanceButtons) {
+      control.dataset.active = String(
+        control.dataset.appearanceMode === state.scene.appearance.preview_mode);
+    }
+  };
 
   state.refreshTabs = () => renderCameraTabs(tabs, state, runtime, monitorLabel);
   state.refreshInspector = () => renderSidePanel(sideContent, state, runtime);
@@ -1397,6 +1540,7 @@ function openEditor(node) {
   state.refreshInspector();
   state.refreshTimeline();
   state.refreshTools();
+  state.refreshAppearanceToolbar();
   runtime.fitView();
   state.loadBackground(state.background.path).catch((error) => {
     state.generation.status = "error";
@@ -1423,9 +1567,9 @@ function createThreeRuntime(mainHost, monitorHost, state, onManipulated) {
   const css = getComputedStyle(document.documentElement);
   const color = (name) => new THREE.Color(css.getPropertyValue(name).trim());
   const mainScene = new THREE.Scene();
-  mainScene.background = color("--cp-bg");
+  mainScene.background = new THREE.Color(state.scene.appearance.sky_color);
   const monitorScene = new THREE.Scene();
-  monitorScene.background = color("--cp-bg");
+  monitorScene.background = new THREE.Color(state.scene.appearance.sky_color);
   const mainCamera = new THREE.PerspectiveCamera(50, 1, 0.05, 1000);
   mainCamera.position.set(8, 6, 10);
   const observationCamera = new THREE.PerspectiveCamera(48, 1, 0.05, 1000);
@@ -1487,9 +1631,26 @@ function createThreeRuntime(mainHost, monitorHost, state, onManipulated) {
   const monitorSpark = new SparkRenderer({ renderer: monitorRenderer });
   mainScene.add(mainSpark);
   monitorScene.add(monitorSpark);
-  const grid = new THREE.GridHelper(30, 30, color("--cp-border-strong"), color("--cp-border"));
+  let grid = null;
   const axes = new THREE.AxesHelper(2);
-  mainScene.add(grid, axes);
+  const createGround = () => {
+    const ground = new THREE.Mesh(
+      new THREE.PlaneGeometry(40, 40),
+      new THREE.MeshStandardMaterial({
+        color: state.scene.appearance.ground_color,
+        roughness: 1,
+        metalness: 0,
+      }),
+    );
+    ground.rotation.x = -Math.PI / 2;
+    ground.position.y = -0.002;
+    ground.receiveShadow = true;
+    return ground;
+  };
+  const mainGround = createGround();
+  const monitorGround = createGround();
+  mainScene.add(mainGround, axes);
+  monitorScene.add(monitorGround);
   const contentRoot = new THREE.Group();
   const monitorContentRoot = new THREE.Group();
   const helperRoot = new THREE.Group();
@@ -1511,6 +1672,105 @@ function createThreeRuntime(mainHost, monitorHost, state, onManipulated) {
   let pathDrawPoints = [];
   let pathPreview = null;
   let pathDrawTarget = null;
+  let currentAppearanceMode = state.scene.appearance.preview_mode;
+
+  function rebuildGrid() {
+    if (grid) {
+      mainScene.remove(grid);
+      grid.geometry.dispose();
+      if (Array.isArray(grid.material)) grid.material.forEach((material) => disposeMaterial(material));
+      else disposeMaterial(grid.material);
+    }
+    const appearance = state.scene.appearance;
+    grid = new THREE.GridHelper(
+      30,
+      30,
+      new THREE.Color(appearance.grid_color).multiplyScalar(0.72),
+      appearance.grid_color,
+    );
+    grid.visible = state.showGrid && appearance.ground_visible;
+    mainScene.add(grid);
+  }
+
+  function objectStyle(item) {
+    if (item.appearance.color) {
+      return { color: item.appearance.color, opacity: item.appearance.opacity };
+    }
+    const appearance = state.scene.appearance;
+    if (item.type === "actor") {
+      const actorIndex = state.scene.objects
+        .filter((candidate) => candidate.type === "actor")
+        .findIndex((candidate) => candidate.id === item.id);
+      const itemColor = appearance.auto_actor_colors
+        ? appearance.actor_palette[Math.max(0, actorIndex) % appearance.actor_palette.length]
+        : appearance.actor_color;
+      return { color: itemColor, opacity: item.appearance.opacity };
+    }
+    return { color: appearance.prop_color, opacity: item.appearance.opacity };
+  }
+
+  function styleProxy(root, item, mode, selected = false) {
+    const style = objectStyle(item);
+    root.traverse((child) => {
+      if (!child.isMesh || !child.material?.color) return;
+      child.material.color.set(mode === "semantic" ? "#000000" : style.color);
+      child.material.opacity = style.opacity;
+      child.material.transparent = style.opacity < 1;
+      child.material.depthWrite = style.opacity >= 1;
+      child.material.wireframe = mode === "wireframe";
+      child.material.roughness = mode === "director" ? 0.72 : 1;
+      child.material.metalness = 0;
+      if (child.material.emissive) {
+        if (selected) {
+          child.material.emissive.copy(color("--cp-accent"));
+          child.material.emissiveIntensity = 1.2;
+        } else if (mode === "semantic") {
+          child.material.emissive.set(style.color);
+          child.material.emissiveIntensity = 1;
+        } else {
+          child.material.emissive.set(state.scene.appearance.sky_color);
+          child.material.emissiveIntensity = mode === "wireframe" ? 0.25 : 0.04;
+        }
+      }
+      child.material.needsUpdate = true;
+    });
+  }
+
+  function styleGround(ground, mode) {
+    const appearance = state.scene.appearance;
+    ground.visible = appearance.ground_visible;
+    ground.material.color.set(mode === "semantic" ? "#000000" : appearance.ground_color);
+    ground.material.wireframe = mode === "wireframe";
+    ground.material.emissive.set(
+      mode === "semantic" ? appearance.ground_color : appearance.sky_color);
+    ground.material.emissiveIntensity = mode === "semantic" ? 1 : 0.03;
+    ground.material.needsUpdate = true;
+  }
+
+  function applyAppearance(mode = state.scene.appearance.preview_mode) {
+    currentAppearanceMode = mode;
+    const appearance = state.scene.appearance;
+    mainScene.background.set(appearance.sky_color);
+    monitorScene.background.set(appearance.sky_color);
+    rebuildGrid();
+    styleGround(mainGround, mode);
+    styleGround(monitorGround, mode);
+    for (const [id, root] of objectRoots) {
+      const item = state.scene.objects.find((candidate) => candidate.id === id);
+      if (item) {
+        styleProxy(
+          root,
+          item,
+          mode,
+          state.selectedKind === "object" && state.selectedObjectId === id,
+        );
+      }
+    }
+    for (const [id, root] of monitorObjectRoots) {
+      const item = state.scene.objects.find((candidate) => candidate.id === id);
+      if (item) styleProxy(root, item, mode, false);
+    }
+  }
 
   function rebuild() {
     transform.detach();
@@ -1523,7 +1783,7 @@ function createThreeRuntime(mainHost, monitorHost, state, onManipulated) {
     pickables.length = 0;
     handles.length = 0;
     for (const item of state.scene.objects) {
-      const root = createObjectProxy(item, color);
+      const root = createObjectProxy(item);
       root.userData = { kind: "object", item };
       root.traverse((child) => {
         if (child.isMesh) {
@@ -1533,7 +1793,8 @@ function createThreeRuntime(mainHost, monitorHost, state, onManipulated) {
       });
       contentRoot.add(root);
       objectRoots.set(item.id, root);
-      const monitorRoot = createObjectProxy(item, color);
+      const monitorRoot = createObjectProxy(item);
+      monitorRoot.userData = { kind: "object", item };
       monitorContentRoot.add(monitorRoot);
       monitorObjectRoots.set(item.id, monitorRoot);
       buildTrackVisual(item.motion_track, helperRoot, color("--cp-link"), {
@@ -1544,7 +1805,7 @@ function createThreeRuntime(mainHost, monitorHost, state, onManipulated) {
     for (const camera of state.cameraRig.cameras) {
       buildCameraVisual(camera);
     }
-    updateSelectionHighlight();
+    applyAppearance();
   }
 
   function buildTrackVisual(track, parent, lineColor, bindingBase) {
@@ -1905,12 +2166,15 @@ function createThreeRuntime(mainHost, monitorHost, state, onManipulated) {
 
   function updateSelectionHighlight() {
     for (const [id, root] of objectRoots) {
-      const selected = state.selectedKind === "object" && id === state.selectedObjectId;
-      root.traverse((child) => {
-        if (!child.isMesh || !child.material?.emissive) return;
-        child.material.emissive.copy(selected ? color("--cp-accent") : color("--cp-bg"));
-        child.material.emissiveIntensity = selected ? 1.5 : 0.05;
-      });
+      const item = state.scene.objects.find((candidate) => candidate.id === id);
+      if (item) {
+        styleProxy(
+          root,
+          item,
+          currentAppearanceMode,
+          state.selectedKind === "object" && id === state.selectedObjectId,
+        );
+      }
     }
   }
 
@@ -2029,6 +2293,14 @@ function createThreeRuntime(mainHost, monitorHost, state, onManipulated) {
     monitorSpark.clearSplats();
     disposeChildren(assetRoot, true);
     disposeChildren(monitorAssetRoot, true);
+    for (const object of [grid, axes, mainGround, monitorGround]) {
+      object?.geometry?.dispose?.();
+      if (Array.isArray(object?.material)) {
+        object.material.forEach((material) => disposeMaterial(material));
+      } else {
+        disposeMaterial(object?.material);
+      }
+    }
   }
 
   function addAsset(object) {
@@ -2089,19 +2361,24 @@ function createThreeRuntime(mainHost, monitorHost, state, onManipulated) {
 
   async function captureFrame(time, width, height) {
     if (disposed) throw new Error("预演编辑器已关闭");
-    updateAnimatedObjects(time);
-    updateObservationCamera(time, width / height);
-    monitorRenderer.setPixelRatio(1);
-    monitorRenderer.setSize(width, height, false);
-    await monitorSpark.update({ scene: monitorScene, camera: observationCamera });
-    monitorRenderer.render(monitorScene, observationCamera);
-    const blob = await new Promise((resolve, reject) => {
-      monitorRenderer.domElement.toBlob(
-        (value) => value ? resolve(value) : reject(new Error("浏览器无法读取 WebGL 渲染帧")),
-        "image/png",
-      );
-    });
-    return blob;
+    const previousMode = currentAppearanceMode;
+    applyAppearance(state.scene.appearance.export_mode);
+    try {
+      updateAnimatedObjects(time);
+      updateObservationCamera(time, width / height);
+      monitorRenderer.setPixelRatio(1);
+      monitorRenderer.setSize(width, height, false);
+      await monitorSpark.update({ scene: monitorScene, camera: observationCamera });
+      monitorRenderer.render(monitorScene, observationCamera);
+      return await new Promise((resolve, reject) => {
+        monitorRenderer.domElement.toBlob(
+          (value) => value ? resolve(value) : reject(new Error("浏览器无法读取 WebGL 渲染帧")),
+          "image/png",
+        );
+      });
+    } finally {
+      applyAppearance(previousMode);
+    }
   }
 
   function dispose() {
@@ -2151,9 +2428,10 @@ function createThreeRuntime(mainHost, monitorHost, state, onManipulated) {
     clearAssets,
     alignBackground,
     captureFrame,
+    applyAppearance: () => applyAppearance(state.scene.appearance.preview_mode),
     setBackgroundTransform: applyBackgroundTransform,
     setGridVisible: (visible) => {
-      grid.visible = visible;
+      grid.visible = visible && state.scene.appearance.ground_visible;
       axes.visible = visible;
     },
     setTransformMode: (mode) => transform.setMode(mode),
@@ -2210,14 +2488,14 @@ function createThreeRuntime(mainHost, monitorHost, state, onManipulated) {
   };
 }
 
-function createObjectProxy(item, color) {
+function createObjectProxy(item) {
   const root = new THREE.Group();
   root.name = item.name;
   const material = () => new THREE.MeshStandardMaterial({
-    color: color("--cp-text-soft"),
+    color: "#808080",
     roughness: 0.72,
     metalness: 0.02,
-    emissive: color("--cp-bg"),
+    emissive: "#000000",
     emissiveIntensity: 0.05,
   });
   if (item.type === "box") {
@@ -2785,6 +3063,7 @@ function addSceneObject(state, runtime, type) {
     scale: [1, 1, 1],
     rotation: [0, 0, 0],
     motion: type === "actor" ? "walk" : "static",
+    appearance: { color: "", opacity: 1 },
     motion_track: normalizeTrack(null, [
       { time: 0, position: [0, 0, 0] },
       { time: 1, position: [0, 0, 0] },
@@ -2992,10 +3271,84 @@ function renderSceneSourcePanel(container, state, runtime) {
   container.appendChild(details);
 }
 
+function renderAppearancePanel(container, state, runtime) {
+  const details = element("details", "vod-previs__appearance");
+  details.open = true;
+  const summary = document.createElement("summary");
+  summary.textContent = "预演视觉样式 · 语义配色";
+  details.appendChild(summary);
+  const appearance = state.scene.appearance;
+  const apply = (changes) => {
+    Object.assign(appearance, changes, { preset: changes.preset || "custom" });
+    state.scene.appearance = normalizeAppearance(appearance);
+    if (Object.keys(changes).some((key) => key !== "preview_mode" && key !== "preset")) {
+      invalidateRenderCache(state);
+    }
+    runtime.applyAppearance();
+    state.refreshAppearanceToolbar?.();
+  };
+  const presets = element("div", "vod-previs__button-row");
+  for (const [label, preset] of [
+    ["导演柔和", "director"],
+    ["高对比语义", "contrast"],
+    ["中性白模", "neutral"],
+  ]) {
+    const control = button(label, () => {
+      state.scene.appearance = normalizeAppearance(structuredClone(APPEARANCE_PRESETS[preset]));
+      invalidateRenderCache(state);
+      runtime.applyAppearance();
+      state.refreshAppearanceToolbar?.();
+      state.refreshInspector?.();
+    });
+    control.dataset.active = String(appearance.preset === preset);
+    presets.appendChild(control);
+  }
+  details.appendChild(presets);
+  details.append(
+    optionSelectInput(
+      "编辑器显示",
+      [
+        { value: "director", label: "导演预览 · 带光照材质" },
+        { value: "semantic", label: "AI 语义色 · 无光照纯色" },
+        { value: "wireframe", label: "线框检查" },
+      ],
+      appearance.preview_mode,
+      (value) => apply({ preview_mode: value }),
+    ),
+    optionSelectInput(
+      "镜头输出",
+      [
+        { value: "semantic", label: "AI 语义参考 · 稳定纯色" },
+        { value: "director", label: "导演预览 · 保留明暗" },
+      ],
+      appearance.export_mode,
+      (value) => apply({ export_mode: value }),
+    ),
+    colorInput("天空", appearance.sky_color, (value) => apply({ sky_color: value })),
+    colorInput("地面", appearance.ground_color, (value) => apply({ ground_color: value })),
+    colorInput("网格", appearance.grid_color, (value) => apply({ grid_color: value })),
+    colorInput("人物默认色", appearance.actor_color, (value) => apply({ actor_color: value })),
+    colorInput("道具 / 模型默认色", appearance.prop_color, (value) => apply({ prop_color: value })),
+    checkboxInput("多人物自动分配稳定高对比颜色", appearance.auto_actor_colors, (value) => {
+      apply({ auto_actor_colors: value });
+    }),
+    checkboxInput("显示并导出地面", appearance.ground_visible, (value) => {
+      apply({ ground_visible: value });
+    }),
+    textElement(
+      "div",
+      "vod-previs__hint",
+      "人物颜色按场景顺序稳定分配；对象自定义色优先于类型默认色。外部 GLB / SPZ 场景保留原始材质，天空、地面和白模对象参与语义配色。",
+    ),
+  );
+  container.appendChild(details);
+}
+
 function renderSidePanel(container, state, runtime) {
   container.replaceChildren();
   if (state.sideTab === "scene") {
     renderSceneSourcePanel(container, state, runtime);
+    renderAppearancePanel(container, state, runtime);
     return;
   }
   const grid = element("div", "vod-previs__side-grid");
@@ -3082,6 +3435,37 @@ function renderObjectInspector(panel, state, runtime) {
   panel.appendChild(selectInput("运动", ["static", "walk"], item.motion, (value) => {
     item.motion = value;
   }));
+  panel.appendChild(textElement("div", "vod-previs__section-title", "对象外观"));
+  panel.appendChild(optionSelectInput(
+    "颜色来源",
+    [
+      { value: "inherit", label: "继承场景语义色" },
+      { value: "custom", label: "对象自定义色" },
+    ],
+    item.appearance.color ? "custom" : "inherit",
+    (value) => {
+      item.appearance.color = value === "custom"
+        ? (item.type === "actor"
+          ? state.scene.appearance.actor_color
+          : state.scene.appearance.prop_color)
+        : "";
+      invalidateRenderCache(state);
+      runtime.applyAppearance();
+      state.refreshInspector?.();
+    },
+  ));
+  if (item.appearance.color) {
+    panel.appendChild(colorInput("自定义色", item.appearance.color, (value) => {
+      item.appearance.color = value;
+      invalidateRenderCache(state);
+      runtime.applyAppearance();
+    }));
+  }
+  panel.appendChild(numberInput("不透明度 0.05-1", item.appearance.opacity, (value) => {
+    item.appearance.opacity = clamp(value, 0.05, 1);
+    invalidateRenderCache(state);
+    runtime.applyAppearance();
+  }, 0.05, "change"));
   appendTrackControls(panel, item.motion_track, () => {
     syncObjectLegacy(item);
     runtime.rebuild();
@@ -3617,6 +4001,38 @@ function numberInput(label, value, onChange, step = 0.1, eventName = "input") {
   input.value = String(finite(value));
   input.addEventListener(eventName, () => onChange(finite(input.value)));
   field.appendChild(input);
+  return field;
+}
+
+function colorInput(label, value, onChange) {
+  const field = element("label", "vod-previs__field");
+  field.appendChild(textElement("span", "", label));
+  const row = element("div", "vod-previs__color-row");
+  const picker = element("input", "vod-previs__color");
+  picker.type = "color";
+  picker.value = normalizeHexColor(value, "#808080");
+  const input = element("input", "vod-previs__input");
+  input.value = picker.value;
+  const commit = (next) => {
+    const color = normalizeHexColor(next, picker.value);
+    picker.value = color;
+    input.value = color;
+    onChange(color);
+  };
+  picker.addEventListener("input", () => commit(picker.value));
+  input.addEventListener("change", () => commit(input.value));
+  row.append(picker, input);
+  field.appendChild(row);
+  return field;
+}
+
+function checkboxInput(label, checked, onChange) {
+  const field = element("label", "vod-previs__confirm");
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.checked = Boolean(checked);
+  input.addEventListener("change", () => onChange(input.checked));
+  field.append(input, textElement("span", "", label));
   return field;
 }
 

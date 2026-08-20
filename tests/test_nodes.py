@@ -940,7 +940,35 @@ check("previs: default scene parsed",
       scene_3d["version"] == 3
       and len(scene_3d["objects"]) == 3
       and {item["type"] for item in scene_3d["objects"]} == {"actor", "box"}
-      and all("motion_track" in item for item in scene_3d["objects"]))
+      and all("motion_track" in item for item in scene_3d["objects"])
+      and scene_3d["appearance"]["export_mode"] == "semantic"
+      and all("appearance" in item for item in scene_3d["objects"]))
+styled_scene = nodes._parse_previs_scene(json.dumps({
+    "appearance": {
+        "preview_mode": "wireframe",
+        "export_mode": "director",
+        "sky_color": "#123456",
+        "auto_actor_colors": False,
+    },
+    "objects": [{
+        "id": "actor-styled", "type": "actor",
+        "appearance": {"color": "#ABCDEF", "opacity": 0.5},
+    }],
+}))
+check("previs: appearance normalized",
+      styled_scene["appearance"]["preview_mode"] == "wireframe"
+      and styled_scene["appearance"]["sky_color"] == "#123456"
+      and not styled_scene["appearance"]["auto_actor_colors"]
+      and styled_scene["objects"][0]["appearance"]
+      == {"color": "#abcdef", "opacity": 0.5})
+try:
+    nodes._parse_previs_scene(json.dumps({
+        "appearance": {"sky_color": "red"},
+        "objects": [],
+    }))
+    check("previs: invalid appearance color rejected", False)
+except ValueError as e:
+    check("previs: invalid appearance color rejected", "RRGGBB" in str(e), str(e))
 path_scene = nodes._parse_previs_scene(json.dumps({"objects": [{
     "id": "actor-path", "name": "曲线路径人物", "type": "actor",
     "position": [0, 0, 0], "end": [4, 0, 4], "scale": [1, 1, 1],
@@ -1037,6 +1065,30 @@ if hasattr(nodes.Image, "new") and hasattr(nodes.np, "asarray"):
           len(previs_frames) == 3 and all(frame.size == (320, 180) for frame in previs_frames))
     check("previs: reference prompt generated",
           "镜头" in nodes._previs_reference_prompt(scene_3d, camera_3d))
+    empty_styled_scene = nodes._parse_previs_scene(json.dumps({
+        "appearance": {"sky_color": "#123456", "ground_visible": False},
+        "objects": [],
+    }))
+    styled_frame = nodes._render_previs_images(
+        empty_styled_scene, camera_3d, 64, 64, 2, show_overlay=False)[0]
+    check("previs: fallback renderer applies sky style",
+          styled_frame.getpixel((0, 0)) == (18, 52, 86),
+          str(styled_frame.getpixel((0, 0))))
+    changed_appearance_scene = json.loads(json.dumps(scene_3d))
+    changed_appearance_scene["appearance"]["actor_color"] = "#112233"
+    preview_only_scene = json.loads(json.dumps(scene_3d))
+    preview_only_scene["appearance"]["preview_mode"] = "wireframe"
+    preview_only_scene["appearance"]["preset"] = "custom"
+    check("previs: appearance participates in cache signature",
+          nodes._previs_manifest_signature(
+              scene_3d, camera_3d, {"source": "Blank"})
+          != nodes._previs_manifest_signature(
+              changed_appearance_scene, camera_3d, {"source": "Blank"}))
+    check("previs: preview style excluded from cache signature",
+          nodes._previs_manifest_signature(
+              scene_3d, camera_3d, {"source": "Blank"})
+          == nodes._previs_manifest_signature(
+              preview_only_scene, camera_3d, {"source": "Blank"}))
     try:
         import torch as _torch  # noqa: F401
     except ImportError:

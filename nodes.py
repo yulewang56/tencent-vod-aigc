@@ -443,8 +443,14 @@ def _previs_canonical(value):
 
 
 def _previs_manifest_signature(scene, camera, background=None):
+    signature_scene = dict(scene)
+    if isinstance(scene.get("appearance"), dict):
+        appearance = dict(scene["appearance"])
+        appearance.pop("preview_mode", None)
+        appearance.pop("preset", None)
+        signature_scene["appearance"] = appearance
     source = (
-        f"{_previs_canonical(scene)}\n"
+        f"{_previs_canonical(signature_scene)}\n"
         f"{_previs_canonical(camera)}\n"
         f"{_previs_canonical(background or {})}"
     )
@@ -497,8 +503,28 @@ def _previs_load_render_cache(
     return images
 
 
+_DEFAULT_PREVIS_APPEARANCE = {
+    "preset": "director",
+    "preview_mode": "director",
+    "export_mode": "semantic",
+    "sky_color": "#d9e7f2",
+    "ground_color": "#c9c3b8",
+    "grid_color": "#788491",
+    "actor_color": "#d45d79",
+    "prop_color": "#6f7f91",
+    "auto_actor_colors": True,
+    "actor_palette": [
+        "#d94f70", "#3978d4", "#2b9a78", "#e18335",
+        "#8a5cc7", "#168fa3", "#b05d2e", "#65722e",
+    ],
+    "ground_visible": True,
+}
+_PREVIS_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
 _DEFAULT_PREVIS_SCENE = json.dumps({
     "version": 3,
+    "appearance": _DEFAULT_PREVIS_APPEARANCE,
     "objects": [
         {"id": "actor-1", "name": "主角", "type": "actor",
          "position": [-1.5, 0, 0], "end": [1.5, 0, 0], "scale": [1, 1, 1],
@@ -657,6 +683,72 @@ def _normalize_previs_track(raw_track, fallback_points, field,
     }
 
 
+def _normalize_previs_color(value, fallback, field):
+    color = str(value or fallback).lower()
+    if not _PREVIS_COLOR_RE.fullmatch(color):
+        raise ValueError(f"{field} 必须是 #RRGGBB 颜色")
+    return color
+
+
+def _normalize_previs_appearance(value):
+    source = value if isinstance(value, dict) else {}
+    defaults = _DEFAULT_PREVIS_APPEARANCE
+    preview_mode = str(source.get("preview_mode") or defaults["preview_mode"]).lower()
+    if preview_mode not in ("director", "semantic", "wireframe"):
+        raise ValueError("appearance.preview_mode 可选 director/semantic/wireframe")
+    export_mode = str(source.get("export_mode") or defaults["export_mode"]).lower()
+    if export_mode not in ("director", "semantic"):
+        raise ValueError("appearance.export_mode 可选 director/semantic")
+    raw_palette = source.get("actor_palette", defaults["actor_palette"])
+    if not isinstance(raw_palette, list) or not 1 <= len(raw_palette) <= 16:
+        raise ValueError("appearance.actor_palette 须包含 1-16 个颜色")
+    palette = [
+        _normalize_previs_color(color, "", f"appearance.actor_palette[{index}]")
+        for index, color in enumerate(raw_palette)
+    ]
+    return {
+        "preset": str(source.get("preset") or defaults["preset"]),
+        "preview_mode": preview_mode,
+        "export_mode": export_mode,
+        "sky_color": _normalize_previs_color(
+            source.get("sky_color"), defaults["sky_color"], "appearance.sky_color"),
+        "ground_color": _normalize_previs_color(
+            source.get("ground_color"), defaults["ground_color"], "appearance.ground_color"),
+        "grid_color": _normalize_previs_color(
+            source.get("grid_color"), defaults["grid_color"], "appearance.grid_color"),
+        "actor_color": _normalize_previs_color(
+            source.get("actor_color"), defaults["actor_color"], "appearance.actor_color"),
+        "prop_color": _normalize_previs_color(
+            source.get("prop_color"), defaults["prop_color"], "appearance.prop_color"),
+        "auto_actor_colors": (
+            source["auto_actor_colors"]
+            if isinstance(source.get("auto_actor_colors"), bool)
+            else defaults["auto_actor_colors"]
+        ),
+        "actor_palette": palette,
+        "ground_visible": (
+            source["ground_visible"]
+            if isinstance(source.get("ground_visible"), bool)
+            else defaults["ground_visible"]
+        ),
+    }
+
+
+def _normalize_previs_object_appearance(value, field):
+    source = value if isinstance(value, dict) else {}
+    raw_color = source.get("color")
+    color = ""
+    if raw_color not in (None, ""):
+        color = _normalize_previs_color(raw_color, "", f"{field}.color")
+    try:
+        opacity = float(source.get("opacity", 1))
+    except (TypeError, ValueError):
+        raise ValueError(f"{field}.opacity 必须是数字") from None
+    if not 0.05 <= opacity <= 1:
+        raise ValueError(f"{field}.opacity 必须在 0.05-1 之间")
+    return {"color": color, "opacity": opacity}
+
+
 def _parse_previs_scene(raw):
     """解析白模场景 JSON，并把 v1/v2 对象轨迹迁移为 V3 track。"""
     try:
@@ -712,8 +804,14 @@ def _parse_previs_scene(raw):
             "scale": scale,
             "rotation": rotation,
             "motion": str(item.get("motion") or "static").lower(),
+            "appearance": _normalize_previs_object_appearance(
+                item.get("appearance"), f"objects[{index}].appearance"),
         })
-    return {"version": 3, "objects": normalized}
+    return {
+        "version": 3,
+        "appearance": _normalize_previs_appearance(data.get("appearance")),
+        "objects": normalized,
+    }
 
 
 def _parse_previs_keyframes(keyframes, field="keyframes"):
@@ -1152,17 +1250,54 @@ def _previs_object_position(item, time_value):
     return position
 
 
-def _previs_draw_grid(draw, camera, width, height):
+def _previs_hex_rgb(value):
+    value = value.lstrip("#")
+    return tuple(int(value[index:index + 2], 16) for index in (0, 2, 4))
+
+
+def _previs_scale_rgb(color, factor):
+    return tuple(max(0, min(255, round(channel * factor))) for channel in color)
+
+
+def _previs_object_render_color(appearance, item, actor_index):
+    custom = item.get("appearance", {}).get("color")
+    if custom:
+        return _previs_hex_rgb(custom)
+    if item["type"] == "actor":
+        if appearance["auto_actor_colors"]:
+            palette = appearance["actor_palette"]
+            return _previs_hex_rgb(palette[actor_index % len(palette)])
+        return _previs_hex_rgb(appearance["actor_color"])
+    return _previs_hex_rgb(appearance["prop_color"])
+
+
+def _previs_draw_ground(draw, camera, width, height, fill):
+    cells = []
+    for x in range(-10, 10):
+        for z in range(-10, 10):
+            points = [
+                _previs_project((x, 0, z), camera, width, height),
+                _previs_project((x + 1, 0, z), camera, width, height),
+                _previs_project((x + 1, 0, z + 1), camera, width, height),
+                _previs_project((x, 0, z + 1), camera, width, height),
+            ]
+            if all(points):
+                cells.append((sum(point[2] for point in points) / 4, points))
+    for _, points in sorted(cells, reverse=True):
+        draw.polygon([(point[0], point[1]) for point in points], fill=fill)
+
+
+def _previs_draw_grid(draw, camera, width, height, line_color):
     for value in range(-10, 11):
         for start, end in (((value, 0, -10), (value, 0, 10)),
                            ((-10, 0, value), (10, 0, value))):
             p1 = _previs_project(start, camera, width, height)
             p2 = _previs_project(end, camera, width, height)
             if p1 and p2:
-                draw.line((p1[0], p1[1], p2[0], p2[1]), fill=(205, 205, 205), width=1)
+                draw.line((p1[0], p1[1], p2[0], p2[1]), fill=line_color, width=1)
 
 
-def _previs_draw_box(draw, item, position, camera, width, height):
+def _previs_draw_box(draw, item, position, camera, width, height, fill, semantic):
     sx, sy, sz = [v * 0.5 for v in item["scale"]]
     vertices = [
         [position[0] + x, position[1] + y, position[2] + z]
@@ -1177,14 +1312,15 @@ def _previs_draw_box(draw, item, position, camera, width, height):
         points = [projected[i] for i in face]
         if all(points):
             visible.append((sum(p[2] for p in points) / 4, face_index, points))
-    shades = ((220, 220, 220), (244, 244, 244), (226, 226, 226),
-              (235, 235, 235), (250, 250, 250), (210, 210, 210))
+    factors = (0.84, 1.0, 0.9, 0.94, 1.08, 0.78)
+    outline = _previs_scale_rgb(fill, 0.48)
     for _, face_index, points in sorted(visible, reverse=True):
         polygon = [(p[0], p[1]) for p in points]
-        draw.polygon(polygon, fill=shades[face_index], outline=(92, 92, 92))
+        shade = fill if semantic else _previs_scale_rgb(fill, factors[face_index])
+        draw.polygon(polygon, fill=shade, outline=outline)
 
 
-def _previs_draw_actor(draw, item, position, camera, width, height, time_value):
+def _previs_draw_actor(draw, item, position, camera, width, height, time_value, fill):
     scale = item["scale"][1]
     phase = np.sin(time_value * np.pi * 6) if item["motion"] == "walk" else 0
     joints = {
@@ -1201,17 +1337,18 @@ def _previs_draw_actor(draw, item, position, camera, width, height, time_value):
                           ("hip", "lf"), ("hip", "rf")):
         p1, p2 = projected[first], projected[second]
         if p1 and p2:
-            draw.line((p1[0], p1[1], p2[0], p2[1]), fill=(70, 70, 70), width=max(2, width // 280))
+            draw.line((p1[0], p1[1], p2[0], p2[1]), fill=fill, width=max(2, width // 280))
     head = projected["head"]
     head_edge = _previs_project([position[0] + 0.18 * scale, position[1] + 2.05 * scale,
                                  position[2]], camera, width, height)
     if head and head_edge:
         radius = max(3, abs(head_edge[0] - head[0]))
         draw.ellipse((head[0] - radius, head[1] - radius, head[0] + radius, head[1] + radius),
-                     fill=(248, 248, 248), outline=(70, 70, 70), width=max(1, width // 500))
+                     fill=fill, outline=_previs_scale_rgb(fill, 0.48),
+                     width=max(1, width // 500))
 
 
-def _previs_draw_sphere(draw, item, position, camera, width, height):
+def _previs_draw_sphere(draw, item, position, camera, width, height, fill):
     center = _previs_project(position, camera, width, height)
     edge = _previs_project([position[0] + item["scale"][0] * 0.5, position[1], position[2]],
                            camera, width, height)
@@ -1219,16 +1356,23 @@ def _previs_draw_sphere(draw, item, position, camera, width, height):
         radius = max(2, abs(edge[0] - center[0]))
         draw.ellipse((center[0] - radius, center[1] - radius,
                       center[0] + radius, center[1] + radius),
-                     fill=(238, 238, 238), outline=(80, 80, 80), width=max(1, width // 500))
+                     fill=fill, outline=_previs_scale_rgb(fill, 0.48),
+                     width=max(1, width // 500))
 
 
 def _render_previs_images(scene, camera, width, height, frame_count,
                            background_asset="", show_overlay=True):
-    """渲染中性白模帧序列；输出 PIL Image 列表，便于 ComfyUI 转 IMAGE batch。"""
+    """渲染预演帧序列；输出 PIL Image 列表，便于 ComfyUI 转 IMAGE batch。"""
     try:
         from PIL import ImageDraw
     except ImportError as e:
         raise RuntimeError("3D 白模预演需要 ComfyUI 环境中的 Pillow ImageDraw") from e
+    appearance = scene.get("appearance") or _normalize_previs_appearance(None)
+    sky_color = _previs_hex_rgb(appearance["sky_color"])
+    ground_color = _previs_hex_rgb(appearance["ground_color"])
+    grid_color = _previs_hex_rgb(appearance["grid_color"])
+    semantic = appearance["export_mode"] == "semantic"
+    actor_ids = [item["id"] for item in scene["objects"] if item["type"] == "actor"]
     images = []
     for frame_index in range(frame_count):
         time_value = frame_index / max(1, frame_count - 1)
@@ -1236,20 +1380,37 @@ def _render_previs_images(scene, camera, width, height, frame_count,
             _previs_camera_for_time(camera, time_value)
             if "cameras" in camera else {"name": "主摄影机", "keyframes": camera["keyframes"]})
         current_camera = _previs_camera_at(current_rig, time_value)
-        image = Image.new("RGB", (width, height), (247, 244, 239))
+        image = Image.new("RGBA", (width, height), (*sky_color, 255))
         draw = ImageDraw.Draw(image)
-        _previs_draw_grid(draw, current_camera, width, height)
+        if appearance["ground_visible"]:
+            _previs_draw_ground(draw, current_camera, width, height, ground_color)
+            _previs_draw_grid(draw, current_camera, width, height, grid_color)
         positioned = [(item, _previs_object_position(item, time_value)) for item in scene["objects"]]
         positioned.sort(
             key=lambda pair: np.linalg.norm(np.asarray(pair[1]) - np.asarray(current_camera["position"])),
             reverse=True)
         for item, position in positioned:
+            actor_index = actor_ids.index(item["id"]) if item["type"] == "actor" else 0
+            base_color = _previs_object_render_color(appearance, item, actor_index)
+            opacity = item.get("appearance", {}).get("opacity", 1.0)
+            object_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+            object_draw = ImageDraw.Draw(object_layer)
             if item["type"] == "actor":
-                _previs_draw_actor(draw, item, position, current_camera, width, height, time_value)
+                _previs_draw_actor(
+                    object_draw, item, position, current_camera, width, height,
+                    time_value, base_color)
             elif item["type"] == "sphere":
-                _previs_draw_sphere(draw, item, position, current_camera, width, height)
+                _previs_draw_sphere(
+                    object_draw, item, position, current_camera, width, height, base_color)
             else:
-                _previs_draw_box(draw, item, position, current_camera, width, height)
+                _previs_draw_box(
+                    object_draw, item, position, current_camera, width, height,
+                    base_color, semantic)
+            if opacity < 1:
+                object_layer.putalpha(
+                    object_layer.getchannel("A").point(lambda alpha: round(alpha * opacity)))
+            image = Image.alpha_composite(image, object_layer)
+            draw = ImageDraw.Draw(image)
         if show_overlay:
             draw.rectangle((12, 12, 250, 42), fill=(255, 255, 255), outline=(145, 145, 145))
             draw.text((22, 21), f"PREVIS  {frame_index + 1:03d}/{frame_count:03d}",
@@ -1259,7 +1420,7 @@ def _render_previs_images(scene, camera, width, height, frame_count,
             if background_asset:
                 label = os.path.basename(background_asset)[:48]
                 draw.text((18, height - 24), f"3D asset: {label}", fill=(92, 92, 92))
-        images.append(image)
+        images.append(image.convert("RGB"))
     return images
 
 
