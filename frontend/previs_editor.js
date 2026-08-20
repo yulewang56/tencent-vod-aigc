@@ -169,7 +169,6 @@ html[data-theme="dark"] {
   min-height: 52px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 14px;
   padding: 9px 14px;
   background: var(--cp-surface);
@@ -183,10 +182,27 @@ html[data-theme="dark"] {
 }
 .vod-previs__title { font-size: 16px; font-weight: 650; }
 .vod-previs__subtitle { color: var(--cp-text-muted); font-size: 12px; }
+.vod-previs__mode-tabs, .vod-previs__inspector-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.vod-previs__mode-tabs {
+  margin-inline: auto;
+  padding: 3px;
+  background: var(--cp-surface-soft);
+  border: 1px solid var(--cp-border);
+  border-radius: 0.625rem;
+}
+.vod-previs__header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
 .vod-previs__body {
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(520px, 1fr) 360px;
+  grid-template-columns: minmax(560px, 1fr) 380px;
 }
 .vod-previs__viewport {
   position: relative;
@@ -209,7 +225,7 @@ html[data-theme="dark"] {
   position: absolute;
   z-index: 3;
   top: 10px;
-  left: 10px;
+  left: 84px;
   right: 10px;
   display: flex;
   align-items: center;
@@ -219,17 +235,73 @@ html[data-theme="dark"] {
 }
 .vod-previs__toolbar > * { pointer-events: auto; }
 .vod-previs__toolbar-spacer { flex: 1; }
+.vod-previs__tool-rail {
+  position: absolute;
+  z-index: 5;
+  top: 10px;
+  bottom: 10px;
+  left: 10px;
+  width: 66px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 7px;
+  overflow-y: auto;
+  background: var(--cp-panel-strong);
+  border: 1px solid var(--cp-border);
+  border-radius: 0.625rem;
+  box-shadow: 0 0 2px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.14);
+}
+.vod-previs__tool-rail .vod-previs__button {
+  width: 100%;
+  min-height: 38px;
+  padding: 5px 3px;
+  font-size: 10px;
+}
+.vod-previs__tool-separator {
+  height: 1px;
+  flex: 0 0 auto;
+  margin: 2px 0;
+  background: var(--cp-border);
+}
+.vod-previs__tool-status {
+  position: absolute;
+  z-index: 5;
+  left: 84px;
+  bottom: 12px;
+  max-width: min(520px, calc(100% - 450px));
+  padding: 6px 9px;
+  color: var(--cp-text);
+  background: var(--cp-panel-strong);
+  border: 1px solid var(--cp-border);
+  border-radius: 7px;
+  font-size: 11px;
+  pointer-events: none;
+}
 .vod-previs__right {
   min-height: 0;
   display: grid;
-  grid-template-rows: minmax(230px, 42%) minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   background: var(--cp-surface);
 }
 .vod-previs__monitor {
-  min-height: 0;
+  position: absolute;
+  z-index: 6;
+  top: 58px;
+  right: 12px;
+  width: min(34%, 380px);
+  aspect-ratio: 16 / 9;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  border-bottom: 1px solid var(--cp-border);
+  overflow: hidden;
+  background: var(--cp-surface);
+  border: 1px solid var(--cp-border-strong);
+  border-radius: 0.625rem;
+  box-shadow: 0 0 2px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.14);
+}
+.vod-previs__viewport[data-mode="scene"] .vod-previs__monitor,
+.vod-previs__viewport[data-mode="camera"] .vod-previs__monitor {
+  display: none;
 }
 .vod-previs__tabs {
   min-height: 38px;
@@ -255,14 +327,21 @@ html[data-theme="dark"] {
   font-size: 11px;
   pointer-events: none;
 }
+.vod-previs__inspector-tabs {
+  min-height: 44px;
+  padding: 6px 8px;
+  overflow-x: auto;
+  background: var(--cp-surface-soft);
+  border-bottom: 1px solid var(--cp-border);
+}
 .vod-previs__side-content {
   min-height: 0;
   overflow: auto;
-  padding: 10px;
+  padding: 12px;
 }
 .vod-previs__side-grid {
   display: grid;
-  grid-template-columns: minmax(115px, 0.78fr) minmax(0, 1.3fr);
+  grid-template-columns: minmax(130px, 0.85fr) minmax(0, 1.3fr);
   gap: 10px;
 }
 .vod-previs__hierarchy {
@@ -422,10 +501,11 @@ html[data-theme="dark"] {
   transform: translateX(-50%);
 }
 .vod-previs__timeline {
-  min-height: 154px;
+  min-height: 208px;
+  max-height: 32vh;
   display: grid;
-  grid-template-columns: 142px minmax(0, 1fr);
-  grid-template-rows: 38px minmax(0, 1fr);
+  grid-template-columns: 190px minmax(0, 1fr);
+  grid-template-rows: 42px minmax(0, 1fr);
   overflow: hidden;
   background: var(--cp-surface);
   border-top: 1px solid var(--cp-border);
@@ -446,6 +526,39 @@ html[data-theme="dark"] {
   cursor: pointer;
   background: var(--cp-surface-soft);
 }
+.vod-previs__timeline-actions {
+  position: absolute;
+  z-index: 3;
+  left: 7px;
+  top: 5px;
+  display: flex;
+  gap: 4px;
+}
+.vod-previs__timeline-actions .vod-previs__button {
+  min-height: 28px;
+  padding: 4px 7px;
+}
+.vod-previs__ruler-ticks {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.vod-previs__ruler-tick {
+  position: absolute;
+  bottom: 2px;
+  transform: translateX(-50%);
+  color: var(--cp-text-muted);
+  font-size: 9px;
+}
+.vod-previs__ruler-tick::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  height: 8px;
+  border-left: 1px solid var(--cp-border-strong);
+}
 .vod-previs__time-readout {
   position: absolute;
   right: 8px;
@@ -458,13 +571,20 @@ html[data-theme="dark"] {
 }
 .vod-previs__track-labels { border-right: 1px solid var(--cp-border); }
 .vod-previs__track-label, .vod-previs__track {
-  height: 28px;
+  height: 29px;
   display: flex;
   align-items: center;
   padding: 0 8px;
   border-bottom: 1px solid var(--cp-border);
 }
 .vod-previs__track { position: relative; padding: 0; cursor: pointer; }
+.vod-previs__track-label--group, .vod-previs__track--group {
+  height: 31px;
+  color: var(--cp-text);
+  background: var(--cp-bg-elevated);
+  font-weight: 650;
+}
+.vod-previs__track-label--child { padding-left: 24px; }
 .vod-previs__track-line {
   position: absolute;
   left: 0;
@@ -485,6 +605,30 @@ html[data-theme="dark"] {
 }
 .vod-previs__marker--cut { background: var(--cp-warning); }
 .vod-previs__marker[data-active="true"] { background: var(--cp-accent); }
+.vod-previs__clip {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  min-width: 20px;
+  overflow: hidden;
+  padding: 3px 7px;
+  color: var(--cp-text);
+  background: var(--cp-highlight);
+  border: 1px solid var(--cp-accent);
+  border-radius: 5px;
+  cursor: pointer;
+  font: 10px/1.3 "Segoe UI", Aptos, Calibri, sans-serif;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vod-previs__clip--camera {
+  background: var(--cp-accent-soft);
+  border-color: var(--cp-link);
+}
+.vod-previs__clip--cut {
+  background: var(--cp-surface-soft);
+  border-color: var(--cp-warning);
+}
 .vod-previs__playhead {
   position: absolute;
   z-index: 5;
@@ -505,9 +649,11 @@ html[data-theme="dark"] {
   background: var(--cp-accent);
 }
 @media (max-width: 1050px) {
-  .vod-previs__body { grid-template-columns: minmax(440px, 1fr) 320px; }
+  .vod-previs__body { grid-template-columns: minmax(440px, 1fr) 330px; }
   .vod-previs__side-grid { grid-template-columns: 1fr; }
   .vod-previs__hierarchy { border-right: 0; border-bottom: 1px solid var(--cp-border); padding: 0 0 8px; }
+  .vod-previs__monitor { width: min(42%, 320px); }
+  .vod-previs__timeline { grid-template-columns: 160px minmax(0, 1fr); }
 }
 `;
   document.head.appendChild(style);
@@ -964,17 +1110,23 @@ function evaluateKeyframeScalar(frames, time, key, fallback) {
   return fallback;
 }
 
-function cameraAt(camera, time) {
-  return {
+function cameraAt(camera, time, scene = null) {
+  const frame = {
     time,
     position: evaluateTrack(camera.position_track, time),
     target: evaluateTrack(camera.target_track, time),
     fov: evaluateScalarTrack(camera.fov_track, time),
     roll: clamp(evaluateKeyframeScalar(camera.keyframes, time, "roll", 0), -180, 180),
   };
+  const targetObject = scene?.objects?.find((item) => item.id === camera.look_at_object_id);
+  if (targetObject) {
+    frame.target = evaluateTrack(targetObject.motion_track, time);
+    if (targetObject.type === "actor") frame.target[1] += 1.2;
+  }
+  return frame;
 }
 
-function renderCameraAt(rig, time) {
+function renderCameraAt(rig, time, scene = null) {
   let cut = rig.cuts[0];
   for (const candidate of rig.cuts) {
     if (candidate.time <= time + EPSILON) cut = candidate;
@@ -983,7 +1135,7 @@ function renderCameraAt(rig, time) {
   const camera = rig.cameras.find((item) => item.id === cut?.camera_id)
     || rig.cameras.find((item) => item.id === rig.active_camera)
     || rig.cameras[0];
-  return camera ? { camera, frame: cameraAt(camera, time), cut } : null;
+  return camera ? { camera, frame: cameraAt(camera, time, scene), cut } : null;
 }
 
 function openEditor(node) {
@@ -1017,6 +1169,10 @@ function openEditor(node) {
     selectedKeyframe: 0,
     observationCameraId: cameraRig.active_camera,
     followCut: true,
+    workspaceMode: "director",
+    sideTab: assetWidget?.value ? "selection" : "scene",
+    pathTool: null,
+    toolMessage: "选择人物或摄影机后，可手绘或逐点创建运动轨迹",
     transformMode: "translate",
     showGrid: true,
     disposed: false,
@@ -1040,6 +1196,8 @@ function openEditor(node) {
     refreshInspector: null,
     refreshTimeline: null,
     refreshTabs: null,
+    refreshTools: null,
+    refreshInspectorTabs: null,
     rebuildScene: null,
     loadBackground: null,
   };
@@ -1057,9 +1215,11 @@ function openEditor(node) {
 
   const body = element("div", "vod-previs__body");
   const viewport = element("main", "vod-previs__viewport");
+  viewport.dataset.mode = state.workspaceMode;
   const mainHost = element("div", "vod-previs__canvas-host");
   const toolbar = element("div", "vod-previs__toolbar");
-  viewport.append(mainHost, toolbar);
+  const toolRail = element("div", "vod-previs__tool-rail");
+  const toolStatus = textElement("div", "vod-previs__tool-status", state.toolMessage);
 
   const right = element("aside", "vod-previs__right");
   const monitor = element("section", "vod-previs__monitor");
@@ -1069,12 +1229,16 @@ function openEditor(node) {
   const monitorLabel = textElement("div", "vod-previs__monitor-label", "OBSERVATION");
   monitorStage.append(monitorHost, monitorLabel);
   monitor.append(tabs, monitorStage);
+  viewport.append(mainHost, toolbar, toolRail, monitor, toolStatus);
+  const inspectorTabs = element("div", "vod-previs__inspector-tabs");
   const sideContent = element("div", "vod-previs__side-content");
-  right.append(monitor, sideContent);
+  right.append(inspectorTabs, sideContent);
   body.append(viewport, right);
 
   const timeline = buildTimeline(state);
   const footer = element("footer", "vod-previs__footer");
+  const modeTabs = element("div", "vod-previs__mode-tabs");
+  const headerActions = element("div", "vod-previs__header-actions");
   let runtime = null;
   let animationFrame = 0;
   let previousTime = performance.now();
@@ -1090,7 +1254,13 @@ function openEditor(node) {
   };
   const persistNodeState = () => {
     for (const item of state.scene.objects) syncObjectLegacy(item);
-    for (const camera of state.cameraRig.cameras) syncCameraLegacy(camera);
+    const objectIds = new Set(state.scene.objects.map((item) => item.id));
+    for (const camera of state.cameraRig.cameras) {
+      if (camera.look_at_object_id && !objectIds.has(camera.look_at_object_id)) {
+        camera.look_at_object_id = "";
+      }
+      syncCameraLegacy(camera);
+    }
     state.cameraRig.cuts = normalizeCuts(
       state.cameraRig.cuts,
       state.cameraRig.cameras,
@@ -1105,7 +1275,20 @@ function openEditor(node) {
     setWidgetValue(node, renderCacheWidget, state.renderCachePath);
   };
   const onKeyDown = (event) => {
-    if (event.key === "Escape") close();
+    if (event.key === "Escape") {
+      if (runtime?.cancelPathDrawing?.()) {
+        state.pathTool = null;
+        state.toolMessage = "已取消轨迹绘制";
+        state.refreshTools?.();
+        return;
+      }
+      close();
+    }
+    if (event.key === "Enter" && runtime?.finishPathDrawing?.()) {
+      state.pathTool = null;
+      state.toolMessage = "轨迹已生成，可拖动控制点继续调整";
+      state.refreshTools?.();
+    }
     if (event.key === " " && !isTypingTarget(event.target)) {
       event.preventDefault();
       state.playing = !state.playing;
@@ -1113,7 +1296,20 @@ function openEditor(node) {
     }
   };
   document.addEventListener("keydown", onKeyDown);
-  header.append(heading, button("关闭", close));
+  for (const [label, mode] of [
+    ["场景", "scene"],
+    ["导演视角", "director"],
+    ["机位视角", "camera"],
+  ]) {
+    const control = button(label, () => {
+      state.workspaceMode = mode;
+      viewport.dataset.mode = mode;
+      state.refreshTools?.();
+    });
+    control.dataset.workspaceMode = mode;
+    modeTabs.appendChild(control);
+  }
+  header.append(heading, modeTabs, headerActions);
   const exportStatus = textElement("span", "vod-previs__subtitle", "");
   const exportButton = button("渲染镜头输出", async () => {
     if (state.exporting) return;
@@ -1138,10 +1334,10 @@ function openEditor(node) {
       exportButton.disabled = false;
     }
   }, true);
+  headerActions.append(exportButton, button("关闭", close));
   footer.append(
     exportStatus,
     element("span", "vod-previs__toolbar-spacer"),
-    exportButton,
     button("取消", close),
     button("保存到节点", () => {
       persistNodeState();
@@ -1189,11 +1385,26 @@ function openEditor(node) {
   state.refreshTabs = () => renderCameraTabs(tabs, state, runtime, monitorLabel);
   state.refreshInspector = () => renderSidePanel(sideContent, state, runtime);
   state.refreshTimeline = () => timeline.render();
+  state.refreshInspectorTabs = () => renderInspectorTabs(
+    inspectorTabs,
+    state,
+    state.refreshInspector,
+  );
+  state.refreshTools = () => {
+    viewport.dataset.mode = state.workspaceMode;
+    toolStatus.textContent = state.toolMessage;
+    for (const control of modeTabs.children) {
+      control.dataset.active = String(control.dataset.workspaceMode === state.workspaceMode);
+    }
+    renderDirectorTools(toolRail, state, runtime);
+  };
   state.rebuildScene = () => runtime.rebuild();
   state.loadBackground = (path) => loadBackgroundAsset(path, runtime, viewport, state);
   state.refreshTabs();
+  state.refreshInspectorTabs();
   state.refreshInspector();
   state.refreshTimeline();
+  state.refreshTools();
   runtime.fitView();
   state.loadBackground(state.background.path).catch((error) => {
     state.generation.status = "error";
@@ -1303,6 +1514,11 @@ function createThreeRuntime(mainHost, monitorHost, state, onManipulated) {
   const raycaster = new THREE.Raycaster();
   const pointer = new THREE.Vector2();
   let hoverSelection = null;
+  let pathDrawMode = null;
+  let pathDrawActive = false;
+  let pathDrawPoints = [];
+  let pathPreview = null;
+  let pathDrawTarget = null;
 
   function rebuild() {
     transform.detach();
@@ -1450,6 +1666,27 @@ function createThreeRuntime(mainHost, monitorHost, state, onManipulated) {
 
   function pointerDown(event) {
     if (event.button !== 0 || transform.dragging) return;
+    if (pathDrawMode) {
+      const point = pathPointFromEvent(event);
+      if (!point) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (pathDrawMode === "freehand") {
+        pathDrawActive = true;
+        pathDrawPoints = [];
+        appendPathDrawPoint(point, true);
+        mainRenderer.domElement.setPointerCapture?.(event.pointerId);
+      } else {
+        if (event.detail >= 2 && finishPathDrawing()) {
+          state.pathTool = null;
+          state.toolMessage = "轨迹已生成，可拖动控制点继续调整";
+          state.refreshTools?.();
+        } else {
+          appendPathDrawPoint(point);
+        }
+      }
+      return;
+    }
     const rect = mainRenderer.domElement.getBoundingClientRect();
     pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
@@ -1489,6 +1726,160 @@ function createThreeRuntime(mainHost, monitorHost, state, onManipulated) {
     updateSelectionHighlight();
     onManipulated();
     event.stopPropagation();
+  }
+
+  function pointerMove(event) {
+    if (pathDrawMode !== "freehand" || !pathDrawActive) return;
+    const point = pathPointFromEvent(event);
+    if (!point) return;
+    appendPathDrawPoint(point);
+  }
+
+  function pointerUp(event) {
+    if (pathDrawMode !== "freehand" || !pathDrawActive) return;
+    pathDrawActive = false;
+    mainRenderer.domElement.releasePointerCapture?.(event.pointerId);
+    if (finishPathDrawing()) {
+      state.pathTool = null;
+      state.toolMessage = "轨迹已生成，可拖动控制点继续调整";
+      state.refreshTools?.();
+    }
+  }
+
+  function selectedPathTarget(reference = null) {
+    const kind = reference?.kind || state.selectedKind;
+    if (kind === "object") {
+      const id = reference?.id || state.selectedObjectId;
+      const item = state.scene.objects.find((entry) => entry.id === id);
+      return item ? { kind: "object", item, track: item.motion_track } : null;
+    }
+    const id = reference?.id || state.selectedCameraId;
+    const camera = state.cameraRig.cameras.find((entry) => entry.id === id);
+    return camera ? { kind: "camera", camera, track: camera.position_track } : null;
+  }
+
+  function pathPointFromEvent(event) {
+    const target = selectedPathTarget(pathDrawTarget);
+    if (!target) return null;
+    const rect = mainRenderer.domElement.getBoundingClientRect();
+    pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(pointer, mainCamera);
+    const height = finite(target.track.points[0]?.position?.[1], 0);
+    return raycaster.ray.intersectPlane(
+      new THREE.Plane(new THREE.Vector3(0, 1, 0), -height),
+      new THREE.Vector3(),
+    );
+  }
+
+  function appendPathDrawPoint(point, force = false) {
+    const previous = pathDrawPoints.at(-1);
+    if (!force && previous && previous.distanceTo(point) < 0.2) return;
+    pathDrawPoints.push(point.clone());
+    updatePathPreview();
+  }
+
+  function updatePathPreview() {
+    if (pathPreview) {
+      helperRoot.remove(pathPreview);
+      pathPreview.geometry.dispose();
+      pathPreview.material.dispose();
+      pathPreview = null;
+    }
+    if (pathDrawPoints.length < 2) return;
+    pathPreview = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(pathDrawPoints),
+      new THREE.LineBasicMaterial({ color: color("--cp-accent") }),
+    );
+    helperRoot.add(pathPreview);
+  }
+
+  function clearPathPreview() {
+    pathDrawActive = false;
+    pathDrawPoints = [];
+    if (pathPreview) {
+      helperRoot.remove(pathPreview);
+      pathPreview.geometry.dispose();
+      pathPreview.material.dispose();
+      pathPreview = null;
+    }
+  }
+
+  function applyPathDrawPoints() {
+    const target = selectedPathTarget(pathDrawTarget);
+    if (!target || pathDrawPoints.length < 2) return false;
+    const source = pathDrawPoints.length <= 32
+      ? pathDrawPoints
+      : Array.from({ length: 32 }, (_, index) =>
+        pathDrawPoints[Math.round((index / 31) * (pathDrawPoints.length - 1))]);
+    const distances = [0];
+    for (let index = 1; index < source.length; index += 1) {
+      distances.push(distances[index - 1] + source[index].distanceTo(source[index - 1]));
+    }
+    const total = Math.max(EPSILON, distances.at(-1));
+    if (total <= EPSILON) return false;
+    const points = source.map((point, index) => ({
+      time: distances[index] / total,
+      position: point.toArray(),
+    }));
+    target.track.points = points;
+    target.track.interpolation = pathDrawMode === "freehand" ? "catmull_rom" : "linear";
+    if (target.kind === "object") {
+      syncObjectLegacy(target.item);
+      state.selectedPointIndex = 0;
+    } else {
+      const oldTarget = target.camera.target_track;
+      const oldFov = target.camera.fov_track;
+      target.camera.target_track = normalizeTrack({
+        ...oldTarget,
+        points: points.map((point) => ({
+          time: point.time,
+          position: evaluateTrack(oldTarget, point.time),
+        })),
+      }, []);
+      target.camera.fov_track = scalarTrack({
+        points: points.map((point) => ({
+          time: point.time,
+          value: evaluateScalarTrack(oldFov, point.time),
+        })),
+      }, []);
+      syncCameraLegacy(target.camera);
+      state.selectedKeyframe = 0;
+    }
+    state.time = 0;
+    clearPathPreview();
+    pathDrawMode = null;
+    pathDrawTarget = null;
+    orbit.enabled = true;
+    rebuild();
+    onManipulated();
+    return true;
+  }
+
+  function finishPathDrawing() {
+    return applyPathDrawPoints();
+  }
+
+  function cancelPathDrawing() {
+    if (!pathDrawMode && !pathDrawPoints.length) return false;
+    clearPathPreview();
+    pathDrawMode = null;
+    pathDrawTarget = null;
+    orbit.enabled = true;
+    return true;
+  }
+
+  function setPathDrawingMode(mode) {
+    cancelPathDrawing();
+    const target = selectedPathTarget();
+    if (!target) return false;
+    pathDrawMode = mode;
+    pathDrawTarget = {
+      kind: target.kind,
+      id: target.kind === "object" ? target.item.id : target.camera.id,
+    };
+    orbit.enabled = false;
+    return true;
   }
 
   function commitTransform() {
@@ -1558,11 +1949,11 @@ function createThreeRuntime(mainHost, monitorHost, state, onManipulated) {
 
   function updateObservationCamera(time, aspect) {
     const observation = state.followCut
-      ? renderCameraAt(state.cameraRig, time)
+      ? renderCameraAt(state.cameraRig, time, state.scene)
       : (() => {
           const camera = state.cameraRig.cameras.find(
             (item) => item.id === state.observationCameraId) || state.cameraRig.cameras[0];
-          return camera ? { camera, frame: cameraAt(camera, time) } : null;
+          return camera ? { camera, frame: cameraAt(camera, time, state.scene) } : null;
         })();
     if (!observation) return;
     observationCamera.position.fromArray(observation.frame.position);
@@ -1574,16 +1965,26 @@ function createThreeRuntime(mainHost, monitorHost, state, onManipulated) {
   }
 
   function render(time) {
-    resizeRenderer(mainRenderer, mainCamera, mainHost);
-    resizeRenderer(monitorRenderer, observationCamera, monitorHost);
     orbit.update();
     updateAnimatedObjects(time);
+    if (state.workspaceMode === "camera") {
+      resizeRenderer(mainRenderer, observationCamera, mainHost);
+      updateObservationCamera(
+        time,
+        Math.max(1, mainHost.clientWidth) / Math.max(1, mainHost.clientHeight),
+      );
+      helperRoot.visible = false;
+      mainRenderer.render(mainScene, observationCamera);
+    } else {
+      resizeRenderer(mainRenderer, mainCamera, mainHost);
+      helperRoot.visible = state.workspaceMode === "director";
+      mainRenderer.render(mainScene, mainCamera);
+    }
+    resizeRenderer(monitorRenderer, observationCamera, monitorHost);
     updateObservationCamera(
       time,
       Math.max(1, monitorHost.clientWidth) / Math.max(1, monitorHost.clientHeight),
     );
-    helperRoot.visible = true;
-    mainRenderer.render(mainScene, mainCamera);
     monitorRenderer.render(monitorScene, observationCamera);
   }
 
@@ -1712,6 +2113,8 @@ function createThreeRuntime(mainHost, monitorHost, state, onManipulated) {
   function dispose() {
     disposed = true;
     mainRenderer.domElement.removeEventListener("pointerdown", pointerDown);
+    mainRenderer.domElement.removeEventListener("pointermove", pointerMove);
+    mainRenderer.domElement.removeEventListener("pointerup", pointerUp);
     resizeObserver.disconnect();
     transform.detach();
     transform.dispose();
@@ -1739,6 +2142,8 @@ function createThreeRuntime(mainHost, monitorHost, state, onManipulated) {
   resizeObserver.observe(mainHost);
   resizeObserver.observe(monitorHost);
   mainRenderer.domElement.addEventListener("pointerdown", pointerDown);
+  mainRenderer.domElement.addEventListener("pointermove", pointerMove);
+  mainRenderer.domElement.addEventListener("pointerup", pointerUp);
   rebuild();
 
   return {
@@ -1758,6 +2163,16 @@ function createThreeRuntime(mainHost, monitorHost, state, onManipulated) {
       axes.visible = visible;
     },
     setTransformMode: (mode) => transform.setMode(mode),
+    setPathDrawingMode,
+    finishPathDrawing,
+    cancelPathDrawing,
+    getCurrentViewFrame: () => ({
+      time: state.time,
+      position: mainCamera.position.toArray(),
+      target: orbit.target.toArray(),
+      fov: mainCamera.fov,
+      roll: 0,
+    }),
     selectObject: (item) => {
       state.selectedKind = "object";
       state.selectedObjectId = item.id;
@@ -1879,12 +2294,27 @@ function buildTimeline(state) {
   );
   transport.append(play, info);
   const ruler = element("div", "vod-previs__ruler");
+  const rulerTicks = element("div", "vod-previs__ruler-ticks");
+  const actions = element("div", "vod-previs__timeline-actions");
+  actions.append(
+    button("+ 轨迹点", () => addTimelinePoint(state)),
+    button("+ CUT", () => addTimelineCut(state)),
+  );
   const readout = textElement("div", "vod-previs__time-readout", "");
   const rulerPlayhead = element("div", "vod-previs__playhead");
-  ruler.append(readout, rulerPlayhead);
+  ruler.append(rulerTicks, actions, readout, rulerPlayhead);
   const labels = element("div", "vod-previs__track-labels");
   const tracks = element("div", "vod-previs__tracks");
   root.append(transport, ruler, labels, tracks);
+  let syncingScroll = false;
+  const syncScroll = (source, target) => {
+    if (syncingScroll) return;
+    syncingScroll = true;
+    target.scrollTop = source.scrollTop;
+    requestAnimationFrame(() => { syncingScroll = false; });
+  };
+  labels.addEventListener("scroll", () => syncScroll(labels, tracks));
+  tracks.addEventListener("scroll", () => syncScroll(tracks, labels));
 
   const scrub = (event, target) => {
     const rect = target.getBoundingClientRect();
@@ -1892,7 +2322,9 @@ function buildTimeline(state) {
     state.playing = false;
     render();
   };
-  ruler.addEventListener("pointerdown", (event) => scrub(event, ruler));
+  ruler.addEventListener("pointerdown", (event) => {
+    if (event.target === ruler) scrub(event, ruler);
+  });
 
   function render() {
     play.textContent = state.playing ? "暂停" : "播放";
@@ -1901,10 +2333,41 @@ function buildTimeline(state) {
     rulerPlayhead.style.left = `${state.time * 100}%`;
     labels.replaceChildren();
     tracks.replaceChildren();
+    rulerTicks.replaceChildren();
+    const wholeSeconds = Math.max(1, Math.ceil(state.duration));
+    for (let second = 0; second <= wholeSeconds; second += 1) {
+      const tick = textElement("span", "vod-previs__ruler-tick", `${second}s`);
+      tick.style.left = `${clamp(second / state.duration, 0, 1) * 100}%`;
+      rulerTicks.appendChild(tick);
+    }
     const rows = [];
     for (const item of state.scene.objects) {
       rows.push({
-        label: `对象 · ${item.name}`,
+        label: `${item.type === "actor" ? "人物" : "物体"} · ${item.name}`,
+        group: true,
+        selectRow: () => {
+          state.selectedKind = "object";
+          state.selectedObjectId = item.id;
+          state.refreshInspector?.();
+        },
+      });
+      rows.push({
+        label: "动作",
+        child: true,
+        clips: [{
+          start: 0,
+          end: 1,
+          label: `${item.motion === "walk" ? "行走" : "静止"} · ${state.duration.toFixed(1)}s`,
+          select: () => {
+            state.selectedKind = "object";
+            state.selectedObjectId = item.id;
+            state.refreshInspector?.();
+          },
+        }],
+      });
+      rows.push({
+        label: "空间轨迹",
+        child: true,
         points: item.motion_track.points,
         active: (index) => state.selectedKind === "object"
           && state.selectedObjectId === item.id
@@ -1922,6 +2385,35 @@ function buildTimeline(state) {
     for (const camera of state.cameraRig.cameras) {
       rows.push({
         label: `摄影机 · ${camera.name}`,
+        group: true,
+        selectRow: () => {
+          state.selectedKind = "camera";
+          state.selectedCameraId = camera.id;
+          state.refreshInspector?.();
+        },
+      });
+      const cameraClips = cutSegments(state.cameraRig).filter(
+        (segment) => segment.camera_id === camera.id,
+      );
+      rows.push({
+        label: "运镜片段",
+        child: true,
+        camera: true,
+        clips: cameraClips.map((segment) => ({
+          start: segment.start,
+          end: segment.end,
+          label: `${camera.name} · ${((segment.end - segment.start) * state.duration).toFixed(1)}s`,
+          select: () => {
+            state.selectedKind = "camera";
+            state.selectedCameraId = camera.id;
+            state.time = segment.start;
+            state.refreshInspector?.();
+          },
+        })),
+      });
+      rows.push({
+        label: "空间轨迹",
+        child: true,
         points: camera.keyframes,
         active: (index) => state.selectedKind === "camera"
           && state.selectedCameraId === camera.id
@@ -1935,34 +2427,97 @@ function buildTimeline(state) {
           state.rebuildScene?.();
         },
       });
+      if (camera.look_at_object_id) {
+        const target = state.scene.objects.find(
+          (item) => item.id === camera.look_at_object_id);
+        rows.push({
+          label: "Look At",
+          child: true,
+          camera: true,
+          clips: [{
+            start: 0,
+            end: 1,
+            label: `始终看向 · ${target?.name || camera.look_at_object_id}`,
+            select: () => {
+              state.selectedKind = "camera";
+              state.selectedCameraId = camera.id;
+              state.refreshInspector?.();
+            },
+          }],
+        });
+      }
     }
     rows.push({
       label: "剪辑 CUTS",
-      points: state.cameraRig.cuts,
-      cut: true,
-      active: () => false,
-      select: (index) => {
-        state.time = state.cameraRig.cuts[index].time;
-        render();
-      },
+      clips: cutSegments(state.cameraRig).map((segment) => {
+        const camera = state.cameraRig.cameras.find(
+          (item) => item.id === segment.camera_id);
+        return {
+          start: segment.start,
+          end: segment.end,
+          label: camera?.name || segment.camera_id,
+          cut: true,
+          select: () => {
+            state.time = segment.start;
+            state.selectedKind = "camera";
+            state.selectedCameraId = segment.camera_id;
+            state.refreshInspector?.();
+          },
+        };
+      }),
     });
     rows.forEach((row) => {
-      labels.appendChild(textElement("div", "vod-previs__track-label", row.label));
-      const track = element("div", "vod-previs__track");
-      track.appendChild(element("div", "vod-previs__track-line"));
+      const labelClass = [
+        "vod-previs__track-label",
+        row.group ? "vod-previs__track-label--group" : "",
+        row.child ? "vod-previs__track-label--child" : "",
+      ].filter(Boolean).join(" ");
+      const label = textElement("div", labelClass, row.label);
+      if (row.selectRow) {
+        label.addEventListener("click", row.selectRow);
+        label.style.cursor = "pointer";
+      }
+      labels.appendChild(label);
+      const track = element(
+        "div",
+        `vod-previs__track${row.group ? " vod-previs__track--group" : ""}`,
+      );
+      if (!row.group && row.points) {
+        track.appendChild(element("div", "vod-previs__track-line"));
+      }
       const playhead = element("div", "vod-previs__playhead");
       playhead.style.left = `${state.time * 100}%`;
       track.appendChild(playhead);
       track.addEventListener("pointerdown", (event) => {
-        if (event.target !== track && event.target.classList.contains("vod-previs__marker")) return;
+        if (event.target !== track) return;
         scrub(event, track);
       });
-      row.points.forEach((point, index) => {
+      for (const clip of row.clips || []) {
+        const clipElement = textElement(
+          "button",
+          `vod-previs__clip${row.camera ? " vod-previs__clip--camera" : ""}${
+            clip.cut ? " vod-previs__clip--cut" : ""}`,
+          clip.label,
+        );
+        clipElement.type = "button";
+        clipElement.style.left = `${clamp(clip.start, 0, 1) * 100}%`;
+        clipElement.style.width = `${Math.max(0.5, clamp(clip.end - clip.start, 0, 1) * 100)}%`;
+        clipElement.addEventListener("click", (event) => {
+          event.stopPropagation();
+          clip.select?.();
+          render();
+        });
+        track.appendChild(clipElement);
+      }
+      (row.points || []).forEach((point, index) => {
         const marker = element("button", `vod-previs__marker${row.cut ? " vod-previs__marker--cut" : ""}`);
         marker.type = "button";
         marker.style.left = `${clamp(point.time, 0, 1) * 100}%`;
         marker.dataset.active = String(row.active(index));
-        marker.setAttribute("aria-label", `${row.label} ${Math.round(point.time * 100)}%`);
+        marker.setAttribute(
+          "aria-label",
+          `${row.label} ${(point.time * state.duration).toFixed(2)}s`,
+        );
         marker.addEventListener("click", (event) => {
           event.stopPropagation();
           row.select(index);
@@ -1974,6 +2529,54 @@ function buildTimeline(state) {
     });
   }
   return { root, render };
+}
+
+function cutSegments(rig) {
+  return rig.cuts.map((cut, index) => ({
+    start: cut.time,
+    end: rig.cuts[index + 1]?.time ?? 1,
+    camera_id: cut.camera_id,
+  }));
+}
+
+function addTimelinePoint(state) {
+  if (state.selectedKind === "object") {
+    const item = state.scene.objects.find((entry) => entry.id === state.selectedObjectId);
+    if (!item || item.motion_track.points.length >= 32) return;
+    const point = upsertTrackPoint(
+      item.motion_track,
+      state.time,
+      evaluateTrack(item.motion_track, state.time),
+    );
+    state.selectedPointIndex = item.motion_track.points.indexOf(point);
+    syncObjectLegacy(item);
+  } else {
+    const camera = getSelectedCamera(state);
+    if (!camera) return;
+    const frame = cameraAt(camera, state.time, state.scene);
+    frame.time = uniqueTime(camera.keyframes, null, state.time);
+    camera.keyframes.push(frame);
+    camera.keyframes.sort((a, b) => a.time - b.time);
+    state.selectedKeyframe = camera.keyframes.indexOf(frame);
+    syncCameraTracks(camera);
+  }
+  state.rebuildScene?.();
+  refreshAll(state);
+}
+
+function addTimelineCut(state) {
+  const camera = getSelectedCamera(state);
+  if (!camera) return;
+  const existing = state.cameraRig.cuts.find(
+    (cut) => Math.abs(cut.time - state.time) < EPSILON);
+  if (existing) existing.camera_id = camera.id;
+  else state.cameraRig.cuts.push({ time: state.time, camera_id: camera.id });
+  state.cameraRig.cuts = normalizeCuts(
+    state.cameraRig.cuts,
+    state.cameraRig.cameras,
+    state.cameraRig.active_camera,
+  );
+  refreshAll(state);
 }
 
 function renderCameraTabs(container, state, runtime, monitorLabel) {
@@ -2087,6 +2690,144 @@ async function uploadLocalAsset(file, state) {
     state.generation.message = error.message;
   }
   state.refreshInspector?.();
+}
+
+function renderInspectorTabs(container, state, refresh) {
+  container.replaceChildren();
+  for (const [label, tab] of [["场景", "scene"], ["对象 / 机位", "selection"]]) {
+    const control = button(label, () => {
+      state.sideTab = tab;
+      renderInspectorTabs(container, state, refresh);
+      refresh?.();
+    });
+    control.dataset.active = String(state.sideTab === tab);
+    container.appendChild(control);
+  }
+}
+
+function renderDirectorTools(container, state, runtime) {
+  container.replaceChildren();
+  const addTool = (label, handler, active = false, title = label) => {
+    const control = button(label, handler);
+    control.dataset.active = String(active);
+    control.title = title;
+    container.appendChild(control);
+    return control;
+  };
+  addTool("选择", () => {
+    state.pathTool = null;
+    runtime.cancelPathDrawing?.();
+    state.toolMessage = "选择场景中的人物、物体、轨迹点或摄影机控制点";
+    state.refreshTools?.();
+  }, !state.pathTool, "选择对象和控制点");
+  for (const [label, mode] of [["移动", "translate"], ["旋转", "rotate"], ["缩放", "scale"]]) {
+    addTool(label, () => {
+      state.pathTool = null;
+      runtime.cancelPathDrawing?.();
+      state.transformMode = mode;
+      runtime.setTransformMode(mode);
+      state.toolMessage = `${label}模式`;
+      state.refreshTools?.();
+    }, !state.pathTool && state.transformMode === mode, `${label}所选对象`);
+  }
+  container.appendChild(element("div", "vod-previs__tool-separator"));
+  addTool("+ 人物", () => addSceneObject(state, runtime, "actor"), false, "添加人物简模");
+  addTool("+ 体块", () => addSceneObject(state, runtime, "box"), false, "添加场景体块");
+  addTool("+ 机位", () => addCameraFromCurrentView(state, runtime), false, "从当前导演视角创建机位");
+  container.appendChild(element("div", "vod-previs__tool-separator"));
+  addTool("手绘轨迹", () => activatePathTool(state, runtime, "freehand"), state.pathTool === "freehand",
+    "按住鼠标左键在水平面上绘制轨迹");
+  addTool("逐点轨迹", () => activatePathTool(state, runtime, "point"), state.pathTool === "point",
+    "逐点点击创建轨迹，按 Enter 完成");
+  if (state.pathTool) {
+    addTool("完成轨迹", () => {
+      if (!runtime.finishPathDrawing?.()) return;
+      state.pathTool = null;
+      state.toolMessage = "轨迹已生成，可拖动控制点继续调整";
+      state.refreshTools?.();
+    }, false, "完成当前轨迹");
+    addTool("取消绘制", () => {
+      runtime.cancelPathDrawing?.();
+      state.pathTool = null;
+      state.toolMessage = "已取消轨迹绘制";
+      state.refreshTools?.();
+    }, false, "取消当前轨迹");
+  }
+}
+
+function activatePathTool(state, runtime, mode) {
+  const hasTarget = state.selectedKind === "object"
+    ? state.scene.objects.some((item) => item.id === state.selectedObjectId)
+    : state.cameraRig.cameras.some((camera) => camera.id === state.selectedCameraId);
+  if (!hasTarget) {
+    state.toolMessage = "请先选择人物、物体或摄影机";
+    state.refreshTools?.();
+    return;
+  }
+  state.workspaceMode = "director";
+  state.pathTool = mode;
+  runtime.setPathDrawingMode?.(mode);
+  state.toolMessage = mode === "freehand"
+    ? "手绘轨迹：按住鼠标左键绘制，松开后自动生成关键帧"
+    : "逐点轨迹：依次点击路径位置，按 Enter 或“完成轨迹”结束";
+  state.refreshTools?.();
+}
+
+function addSceneObject(state, runtime, type) {
+  const id = uniqueId(state.scene.objects, type);
+  const item = {
+    id,
+    name: type === "actor" ? "人物" : type === "sphere" ? "球体" : "体块",
+    type,
+    position: [0, 0, 0],
+    end: [0, 0, 0],
+    path: [{ time: 0, position: [0, 0, 0] }, { time: 1, position: [0, 0, 0] }],
+    scale: [1, 1, 1],
+    rotation: [0, 0, 0],
+    motion: type === "actor" ? "walk" : "static",
+    motion_track: normalizeTrack(null, [
+      { time: 0, position: [0, 0, 0] },
+      { time: 1, position: [0, 0, 0] },
+    ]),
+  };
+  state.scene.objects.push(item);
+  state.selectedKind = "object";
+  state.selectedObjectId = id;
+  state.selectedPointIndex = 0;
+  state.sideTab = "selection";
+  state.toolMessage = `已添加${item.name}，可直接移动或绘制轨迹`;
+  runtime.rebuild();
+  runtime.selectObject(item);
+  state.refreshInspectorTabs?.();
+  refreshAll(state);
+}
+
+function addCameraFromCurrentView(state, runtime) {
+  if (state.cameraRig.cameras.length >= MAX_CAMERAS) {
+    state.toolMessage = `最多支持 ${MAX_CAMERAS} 台摄影机`;
+    state.refreshTools?.();
+    return;
+  }
+  const id = uniqueId(state.cameraRig.cameras, "camera");
+  const frame = runtime.getCurrentViewFrame();
+  frame.time = state.time;
+  const camera = normalizeCamera({
+    id,
+    name: `Camera ${state.cameraRig.cameras.length + 1}`,
+    keyframes: [frame],
+  }, state.cameraRig.cameras.length, new Set(state.cameraRig.cameras.map((item) => item.id)));
+  state.cameraRig.cameras.push(camera);
+  state.selectedKind = "camera";
+  state.selectedCameraId = camera.id;
+  state.selectedKeyframe = 0;
+  state.observationCameraId = camera.id;
+  state.followCut = false;
+  state.sideTab = "selection";
+  state.toolMessage = `已从当前视角创建 ${camera.name}`;
+  runtime.rebuild();
+  runtime.selectCameraFrame(camera, 0);
+  state.refreshInspectorTabs?.();
+  refreshAll(state);
 }
 
 function renderSceneSourcePanel(container, state, runtime) {
@@ -2253,7 +2994,10 @@ function renderSceneSourcePanel(container, state, runtime) {
 
 function renderSidePanel(container, state, runtime) {
   container.replaceChildren();
-  renderSceneSourcePanel(container, state, runtime);
+  if (state.sideTab === "scene") {
+    renderSceneSourcePanel(container, state, runtime);
+    return;
+  }
   const grid = element("div", "vod-previs__side-grid");
   const hierarchy = element("div", "vod-previs__hierarchy");
   const inspector = element("div");
@@ -2280,32 +3024,7 @@ function renderSidePanel(container, state, runtime) {
   hierarchy.appendChild(objectList);
   const addRow = element("div", "vod-previs__button-row");
   for (const [label, type] of [["+ 人", "actor"], ["+ 盒", "box"], ["+ 球", "sphere"]]) {
-    addRow.appendChild(button(label, () => {
-      const id = uniqueId(state.scene.objects, type);
-      const y = type === "actor" ? 0 : 0;
-      const item = {
-        id,
-        name: type === "actor" ? "人物" : type === "sphere" ? "球体" : "体块",
-        type,
-        position: [0, y, 0],
-        end: [0, y, 0],
-        path: [{ time: 0, position: [0, y, 0] }, { time: 1, position: [0, y, 0] }],
-        scale: [1, 1, 1],
-        rotation: [0, 0, 0],
-        motion: type === "actor" ? "walk" : "static",
-        motion_track: normalizeTrack(null, [
-          { time: 0, position: [0, y, 0] },
-          { time: 1, position: [0, y, 0] },
-        ]),
-      };
-      state.scene.objects.push(item);
-      state.selectedKind = "object";
-      state.selectedObjectId = id;
-      state.selectedPointIndex = 0;
-      runtime.rebuild();
-      state.refreshInspector?.();
-      state.refreshTimeline?.();
-    }));
+    addRow.appendChild(button(label, () => addSceneObject(state, runtime, type)));
   }
   hierarchy.appendChild(addRow);
   hierarchy.appendChild(textElement("div", "vod-previs__section-title", `摄影机 · ${state.cameraRig.cameras.length}/${MAX_CAMERAS}`));
@@ -2327,20 +3046,7 @@ function renderSidePanel(container, state, runtime) {
   }
   hierarchy.appendChild(cameraList);
   const cameraActions = element("div", "vod-previs__button-row");
-  const addCamera = button("+ 摄影机", () => {
-    if (state.cameraRig.cameras.length >= MAX_CAMERAS) return;
-    const id = uniqueId(state.cameraRig.cameras, "camera");
-    const source = getSelectedCamera(state);
-    const frame = source ? cameraAt(source, state.time) : structuredClone(DEFAULT_KEYFRAMES[0]);
-    frame.time = state.time;
-    const camera = normalizeCamera({ id, name: `Camera ${state.cameraRig.cameras.length + 1}`, keyframes: [frame] }, state.cameraRig.cameras.length, new Set(state.cameraRig.cameras.map((item) => item.id)));
-    state.cameraRig.cameras.push(camera);
-    state.selectedKind = "camera";
-    state.selectedCameraId = id;
-    state.selectedKeyframe = 0;
-    runtime.rebuild();
-    refreshAll(state);
-  });
+  const addCamera = button("+ 当前视角机位", () => addCameraFromCurrentView(state, runtime));
   addCamera.disabled = state.cameraRig.cameras.length >= MAX_CAMERAS;
   const duplicate = button("复制", () => {
     if (state.cameraRig.cameras.length >= MAX_CAMERAS) return;
@@ -2444,6 +3150,9 @@ function renderObjectInspector(panel, state, runtime) {
   panel.appendChild(actions);
   panel.appendChild(vecInput("Scale", item.scale, () => runtime.rebuild(), 0.05));
   panel.appendChild(button("删除对象", () => {
+    for (const camera of state.cameraRig.cameras) {
+      if (camera.look_at_object_id === item.id) camera.look_at_object_id = "";
+    }
     state.scene.objects = state.scene.objects.filter((entry) => entry !== item);
     state.selectedObjectId = state.scene.objects[0]?.id || null;
     state.selectedKind = state.scene.objects.length ? "object" : "camera";
@@ -2457,6 +3166,30 @@ function renderCameraInspector(panel, state, runtime) {
   if (!camera) return;
   panel.appendChild(textInput("摄影机名称", camera.name, (value) => {
     camera.name = value || camera.name;
+    refreshAll(state);
+  }));
+  panel.appendChild(optionSelectInput(
+    "Look At 目标",
+    [
+      { value: "", label: "自由目标点" },
+      ...state.scene.objects.map((item) => ({
+        value: item.id,
+        label: `${item.type === "actor" ? "人物" : "物体"} · ${item.name}`,
+      })),
+    ],
+    camera.look_at_object_id || "",
+    (value) => {
+      camera.look_at_object_id = value || "";
+      runtime.rebuild();
+      refreshAll(state);
+    },
+  ));
+  panel.appendChild(button("用当前导演视角更新此关键帧", () => {
+    const frame = runtime.getCurrentViewFrame();
+    frame.time = camera.keyframes[state.selectedKeyframe]?.time ?? state.time;
+    camera.keyframes[state.selectedKeyframe] = frame;
+    syncCameraTracks(camera);
+    runtime.rebuild();
     refreshAll(state);
   }));
   appendTrackControls(panel, camera.position_track, () => {
@@ -2916,6 +3649,22 @@ function selectInput(label, options, selected, onChange) {
     option.value = value;
     option.textContent = value;
     option.selected = value === selected;
+    select.appendChild(option);
+  }
+  select.addEventListener("change", () => onChange(select.value));
+  field.appendChild(select);
+  return field;
+}
+
+function optionSelectInput(label, options, selected, onChange) {
+  const field = element("label", "vod-previs__field");
+  field.appendChild(textElement("span", "", label));
+  const select = element("select", "vod-previs__select");
+  for (const item of options) {
+    const option = document.createElement("option");
+    option.value = item.value;
+    option.textContent = item.label;
+    option.selected = item.value === selected;
     select.appendChild(option);
   }
   select.addEventListener("change", () => onChange(select.value));

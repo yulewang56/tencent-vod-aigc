@@ -174,15 +174,21 @@ cp tencent-vod-config.example.json tencent-vod-config.json
   ComfyUI `input/output/temp` 内的绝对路径；GLTF/OBJ 如依赖外部贴图或二进制文件，建议先打包为 GLB
 - 点击节点上的「打开 3D 预演编辑器」进入 Three.js WebGL 主视窗；人物使用球体/胶囊/
   圆柱组合的立体 humanoid 简模，体块和球体也是实际 3D mesh
+- 编辑器使用导演工作台布局：顶部切换场景/导演视角/机位视角，左侧集中放置选择、变换、人物、
+  体块、机位和轨迹工具；机位观察窗悬浮在主视窗右上角，右侧全高区域专门用于场景或所选对象属性
 - SPZ 使用本地打包的 Spark 2.1.0 在主视窗和摄影机观察窗原生渲染；GLB/GLTF/OBJ/PLY
   继续使用 Three.js loader。背景支持 Position、Rotation（度）、统一 Scale 和按边界居中落地
-- 主视窗支持透视/顶/前/侧视图、Orbit 浏览、TransformControls 和轨迹控制点拖拽；
-  右上角镜头观察窗可独立选择摄影机或跟随当前切镜
+- 主视窗支持透视/顶/前/侧视图、Orbit 浏览、TransformControls 和轨迹控制点拖拽；人物或摄影机
+  可使用「手绘轨迹」连续绘制曲线，或使用「逐点轨迹」精确设置转折点，完成后自动生成时间关键帧
+- 摄影机可从当前导演视角直接创建或更新，并可将 Look At 持续绑定到某个人物/物体；右上角
+  镜头观察窗可独立选择摄影机或跟随当前 CUT
 - 对象和摄影机 Position / Look At 轨迹支持 `linear`、`catmull_rom`、`bezier`，速度支持
   `keyframed`、`constant`、`ease_in`、`ease_out`、`ease_in_out`、`custom`；
   曲线匀速和 easing 使用弧长采样，`speed_description` 会写入下游参考提示词
 - 支持最多 8 台摄影机方案：新增、复制、重命名、切换和删除；每台摄影机拥有独立的
   Position / Look At / FOV / Roll 关键帧，并可在底部时间线上添加切镜点
+- 底部导演时间线按人物动作、空间轨迹、摄影机运镜、Look At 与 CUT 分层显示，使用秒数和语义
+  片段作为默认视图；展开后的关键帧仍沿用原有 V3 track 数据，可继续精确编辑
 - 旧版单摄影机 `{keyframes:[...]}`、v2 多摄影机和对象 `position/end/path` 会自动迁移为 V3，
   保存时仍同步兼容字段
 - 节点输出 `IMAGE` batch 和原生 `VIDEO`；`fps` 控制帧率，启用 `export_video` 后同时写出 MP4，
