@@ -58,6 +58,12 @@ Coordinate system:
   report only tabletop, seat, or panel thickness as total height.
 - Do not include people, pictures of objects, reflections, text, or tiny clutter.
 - Use one axis-aligned or yaw-rotated box proxy per physical object.
+- Count every physical table and chair exactly once. Do not emit alternate
+  hypotheses, duplicate boxes, partially overlapping copies, or hidden copies
+  of an already listed instance.
+- Before writing objects, count the visually distinct tabletops and chair
+  seats. Emit one tight image_bbox for each visible physical instance. A broad
+  bbox that covers multiple desks or multiple chairs is invalid.
 - Preserve the photographed spacing. Do not regularize repeated furniture into
   an ideal grid unless the image actually shows equal spacing.
 - Mark hidden geometry as inferred. Do not invent decorative detail.
@@ -71,7 +77,10 @@ Use these exact JSON fields without copying any preset scene dimensions:
 - camera: position (3 numbers), target (3 numbers), fov_degrees
 - objects: array of objects containing name, category, position (3 numbers),
   size (3 numbers), yaw_degrees, confidence, evidence, movable, wall,
-  image_bbox, and floor_contact
+  image_bbox, floor_contact, instance_id, and paired_instance_id
+- instance_id is a unique stable identifier for that physical instance
+- for a chair assigned to a table, paired_instance_id is that table's
+  instance_id; use an empty string when no pairing is visible
 - image_bbox is [left, top, right, bottom] in primary-image normalized 0-1
   coordinates and must tightly cover the visible extent of that instance
 - floor_contact is [x, y] in normalized 0-1 primary-image coordinates at the
@@ -91,6 +100,11 @@ Before replying, verify:
 - wall fixtures are thin and share a consistent wall plane
 - repeated furniture preserves each photographed floor contact and gap instead
   of being replaced by a synthetic evenly spaced grid
+- every listed table/chair corresponds to a different visible physical instance
+- the number of table/chair objects matches the visible tabletop/chair-seat
+  inventory, including partially occluded instances
+- every classroom chair is paired to at most one table, and every table to at
+  most one chair
 - room and camera numbers were inferred from the image, not copied from this instruction
 
 Return only one valid JSON object with those fields and no Markdown.
@@ -373,41 +387,461 @@ def _interaction_anchor(category, position, size):
     return None
 
 
-def _separate_furniture_pairs(objects, depth, warnings):
-    tables = [item for item in objects if item["category"] == "table"]
-    for chair in (item for item in objects if item["category"] == "chair"):
-        if not tables:
-            return
-        table = min(
-            tables,
-            key=lambda item: math.hypot(
-                chair["position"][0] - item["position"][0],
-                chair["position"][2] - item["position"][2],
-            ),
-        )
-        distance = math.hypot(
+def _bbox_area(bbox):
+    return max(0.0, bbox[2] - bbox[0]) * max(0.0, bbox[3] - bbox[1])
+
+
+def _bbox_iou(left, right):
+    if left is None or right is None:
+        return 0.0
+    intersection = (
+        max(0.0, min(left[2], right[2]) - max(left[0], right[0]))
+        * max(0.0, min(left[3], right[3]) - max(left[1], right[1]))
+    )
+    union = _bbox_area(left) + _bbox_area(right) - intersection
+    return intersection / union if union > 1e-8 else 0.0
+
+
+def _observation_point(entity):
+    contact = entity.get("floor_contact")
+    if contact is not None:
+        return contact
+    bbox = entity.get("image_bbox")
+    if bbox is not None:
+        return [(bbox[0] + bbox[2]) * 0.5, bbox[3]]
+    return None
+
+
+def _deduplicate_furniture(objects, warnings):
+    kept = []
+    removed = 0
+    for entity in objects:
+        if entity["category"] not in {"table", "chair"}:
+            kept.append(entity)
+            continue
+        point = _observation_point(entity)
+        duplicate = None
+        for existing in kept:
+            if existing["category"] != entity["category"]:
+                continue
+            existing_point = _observation_point(existing)
+            point_distance = (
+                math.hypot(
+                    point[0] - existing_point[0],
+                    point[1] - existing_point[1],
+                )
+                if point is not None and existing_point is not None else float("inf")
+            )
+            overlap = _bbox_iou(entity.get("image_bbox"), existing.get("image_bbox"))
+            same_instance = (
+                entity.get("instance_id")
+                and entity["instance_id"] == existing.get("instance_id")
+            )
+            if (
+                same_instance and point_distance <= 0.03
+                or overlap >= 0.92 and point_distance <= 0.012
+            ):
+                duplicate = existing
+                break
+            if same_instance:
+                warnings.append(
+                    f"{entity['name']} 与 {existing['name']} 的 instance_id 重复但图像位置冲突，"
+                    "已保留两个实例"
+                )
+        if duplicate is None:
+            kept.append(entity)
+            continue
+        removed += 1
+        if entity["confidence"] > duplicate["confidence"]:
+            kept[kept.index(duplicate)] = entity
+            duplicate, entity = entity, duplicate
+        warnings.append(f"{entity['name']} 与 {duplicate['name']} 属于同一图像实例，已去重")
+    return kept, removed
+
+
+def _pair_cost(table, chair):
+    table_instance = table.get("instance_id")
+    chair_instance = chair.get("instance_id")
+    table_claims_chair = (
+        table.get("paired_instance_id")
+        and table["paired_instance_id"] == chair_instance
+    )
+    chair_claims_table = (
+        chair.get("paired_instance_id")
+        and chair["paired_instance_id"] == table_instance
+    )
+    explicit_bonus = (
+        1.6 if table_claims_chair and chair_claims_table
+        else 0.8 if table_claims_chair or chair_claims_table
+        else 0.0
+    )
+    table_point = _observation_point(table)
+    chair_point = _observation_point(chair)
+    if table_point is None or chair_point is None:
+        return math.hypot(
             chair["position"][0] - table["position"][0],
             chair["position"][2] - table["position"][2],
-        )
-        _, chair_footprint_z = _rotated_footprint(
-            chair["size"], chair["yaw_degrees"])
-        _, table_footprint_z = _rotated_footprint(
-            table["size"], table["yaw_degrees"])
-        minimum_gap = chair_footprint_z + table_footprint_z + 0.12
-        if distance >= minimum_gap * 0.45:
+        ) / 10.0 + 0.4 - explicit_bonus
+    table_bbox = table.get("image_bbox")
+    chair_bbox = chair.get("image_bbox")
+    horizontal = abs(chair_point[0] - table_point[0])
+    vertical = abs(chair_point[1] - table_point[1])
+    outside = 0.0
+    if table_bbox is not None and chair_bbox is not None:
+        chair_center = (chair_bbox[0] + chair_bbox[2]) * 0.5
+        if chair_center < table_bbox[0] - 0.08 or chair_center > table_bbox[2] + 0.08:
+            outside = 0.4
+    return horizontal * 2.5 + vertical * 1.5 + outside - explicit_bonus
+
+
+def _assign_table_chair_pairs(objects, warnings):
+    tables = [item for item in objects if item["category"] == "table"]
+    chairs = [item for item in objects if item["category"] == "chair"]
+    paired_tables = set()
+    paired_chairs = set()
+    pairs = []
+
+    def assign(table, chair):
+        paired_tables.add(table["id"])
+        paired_chairs.add(chair["id"])
+        pair_id = f"desk-pair-{len(pairs) + 1:02d}"
+        table["pair_id"] = pair_id
+        chair["pair_id"] = pair_id
+        table["paired_entity_id"] = chair["id"]
+        chair["paired_entity_id"] = table["id"]
+        pairs.append((table, chair))
+
+    for table in tables:
+        mutual = [
+            chair for chair in chairs
+            if (
+                table.get("paired_instance_id") == chair.get("instance_id")
+                and chair.get("paired_instance_id") == table.get("instance_id")
+                and table.get("instance_id")
+                and chair.get("instance_id")
+            )
+        ]
+        if len(mutual) == 1 and mutual[0]["id"] not in paired_chairs:
+            assign(table, mutual[0])
+
+    for chair in chairs:
+        if chair["id"] in paired_chairs or not chair.get("paired_instance_id"):
             continue
-        chair_bottom = (
-            chair["image_bbox"][3] if chair.get("image_bbox") is not None else 0.0)
-        table_bottom = (
-            table["image_bbox"][3] if table.get("image_bbox") is not None else 0.0)
-        direction = -1.0 if chair_bottom > table_bottom + 0.03 else 1.0
-        candidate = table["position"][2] + direction * minimum_gap
-        limit = max(0.0, depth * 0.5 - chair_footprint_z)
-        if not -limit <= candidate <= limit:
-            candidate = table["position"][2] - direction * minimum_gap
-        chair["position"][2] = min(max(candidate, -limit), limit)
-        chair["projection_source"] = "image_contact_pair_offset"
-        warnings.append(f"{chair['name']} 与配对桌子重叠，已按座椅净距分离")
+        claimed_tables = [
+            table for table in tables
+            if (
+                table["id"] not in paired_tables
+                and table.get("instance_id") == chair["paired_instance_id"]
+            )
+        ]
+        competing_chairs = [
+            candidate for candidate in chairs
+            if (
+                candidate["id"] not in paired_chairs
+                and candidate.get("paired_instance_id") == chair["paired_instance_id"]
+            )
+        ]
+        if len(claimed_tables) == 1 and len(competing_chairs) == 1:
+            assign(claimed_tables[0], chair)
+
+    candidates = sorted(
+        (_pair_cost(table, chair), table["id"], chair["id"], table, chair)
+        for table in tables for chair in chairs
+        if table["id"] not in paired_tables and chair["id"] not in paired_chairs
+    )
+    for cost, _, _, table, chair in candidates:
+        if cost > 1.6 or table["id"] in paired_tables or chair["id"] in paired_chairs:
+            continue
+        assign(table, chair)
+    unpaired_chairs = len(chairs) - len(paired_chairs)
+    if unpaired_chairs:
+        warnings.append(f"{unpaired_chairs} 把椅子未找到唯一桌子配对，已保留原图像落点")
+    return pairs
+
+
+def _chair_pair_offset(table, chair):
+    table_bbox = table.get("image_bbox")
+    chair_bbox = chair.get("image_bbox")
+    table_point = _observation_point(table)
+    chair_point = _observation_point(chair)
+    dx = 0.0
+    if table_point is not None and chair_point is not None:
+        dx = (chair_point[0] - table_point[0]) * table["size"][0] * 1.4
+    dx = min(max(dx, -table["size"][0] * 0.32), table["size"][0] * 0.32)
+    chair_lower = (
+        chair_bbox is not None and table_bbox is not None
+        and chair_bbox[3] >= table_bbox[3] - 0.03
+    )
+    direction = -1.0 if chair_lower else 1.0
+    _, table_half_z = _rotated_footprint(table["size"], table["yaw_degrees"])
+    _, chair_half_z = _rotated_footprint(chair["size"], chair["yaw_degrees"])
+    separation = max(0.42, table_half_z + chair_half_z - 0.08)
+    return dx, direction * separation
+
+
+def _table_layout_point(table, pair_lookup):
+    return (
+        _observation_point(table)
+        or _observation_point(pair_lookup.get(table["id"], {}))
+        or [0.5, 0.5]
+    )
+
+
+def _cluster_rows(tables, pair_lookup):
+    rows = []
+    ordered = sorted(
+        tables,
+        key=lambda item: -_table_layout_point(item, pair_lookup)[1],
+    )
+    for table in ordered:
+        observed_y = _table_layout_point(table, pair_lookup)[1]
+        row = next(
+            (candidate for candidate in rows
+             if abs(candidate["observed_y"] - observed_y) <= 0.065),
+            None,
+        )
+        if row is None:
+            row = {"observed_y": observed_y, "tables": []}
+            rows.append(row)
+        row["tables"].append(table)
+        row["observed_y"] = sum(
+            _table_layout_point(item, pair_lookup)[1]
+            for item in row["tables"]
+        ) / len(row["tables"])
+    return sorted(rows, key=lambda row: -row["observed_y"])
+
+
+def _pair_extents(table, chair):
+    table_half_x, table_half_z = _rotated_footprint(
+        table["size"], table["yaw_degrees"])
+    minimum_x = -table_half_x
+    maximum_x = table_half_x
+    minimum_z = -table_half_z
+    maximum_z = table_half_z
+    if chair is not None:
+        chair_half_x, chair_half_z = _rotated_footprint(
+            chair["size"], chair["yaw_degrees"])
+        dx = chair["position"][0] - table["position"][0]
+        dz = chair["position"][2] - table["position"][2]
+        minimum_x = min(minimum_x, dx - chair_half_x)
+        maximum_x = max(maximum_x, dx + chair_half_x)
+        minimum_z = min(minimum_z, dz - chair_half_z)
+        maximum_z = max(maximum_z, dz + chair_half_z)
+    return minimum_x, maximum_x, minimum_z, maximum_z
+
+
+def _pack_row_x(row, pair_lookup, width):
+    tables = sorted(
+        row["tables"],
+        key=lambda item: _table_layout_point(item, pair_lookup)[0],
+    )
+    extents = [
+        _pair_extents(table, pair_lookup.get(table["id"])) for table in tables
+    ]
+    gap = 0.22
+    offsets = [-extents[0][0]]
+    for index in range(1, len(tables)):
+        offsets.append(
+            offsets[-1] + extents[index - 1][1] - extents[index][0] + gap
+        )
+    group_width = offsets[-1] + extents[-1][1]
+    observed_centers = [
+        _table_layout_point(table, pair_lookup)[0] for table in tables
+    ]
+    desired_center = (
+        sum((center - 0.5) * width * 0.85 for center in observed_centers)
+        / len(observed_centers)
+    )
+    start = min(
+        max(desired_center - group_width * 0.5, -width * 0.5 + 0.08),
+        width * 0.5 - group_width - 0.08,
+    )
+    if group_width > width - 0.16:
+        start = -width * 0.5 + 0.08
+    for table, offset in zip(tables, offsets):
+        target = start + offset
+        delta = target - table["position"][0]
+        table["position"][0] = target
+        chair = pair_lookup.get(table["id"])
+        if chair is not None:
+            chair["position"][0] += delta
+
+
+def _pack_rows_z(rows, pair_lookup, depth):
+    row_shapes = []
+    for row in rows:
+        near = 0.0
+        far = 0.0
+        desired = 0.0
+        for table in row["tables"]:
+            extents = _pair_extents(table, pair_lookup.get(table["id"]))
+            near = min(near, extents[2])
+            far = max(far, extents[3])
+            desired += table["position"][2]
+        row_shapes.append({
+            "row": row,
+            "near": -near,
+            "far": far,
+            "desired": desired / len(row["tables"]),
+        })
+    gap = 0.16
+    required = sum(shape["near"] + shape["far"] for shape in row_shapes)
+    required += gap * max(0, len(row_shapes) - 1)
+    if len(row_shapes) > 1 and required > depth - 0.16:
+        gap = max(0.04, (depth - 0.16 - sum(
+            shape["near"] + shape["far"] for shape in row_shapes
+        )) / (len(row_shapes) - 1))
+    centers = []
+    cursor = -depth * 0.5 + 0.08
+    for shape in row_shapes:
+        center = cursor + shape["near"]
+        centers.append(center)
+        cursor = center + shape["far"] + gap
+    group_end = cursor - gap + 0.08
+    if group_end < depth * 0.5:
+        desired_center = sum(shape["desired"] for shape in row_shapes) / len(row_shapes)
+        current_center = (centers[0] - row_shapes[0]["near"] + group_end) * 0.5
+        shift = min(
+            max(desired_center - current_center, -depth * 0.5 + 0.08 - (
+                centers[0] - row_shapes[0]["near"])),
+            depth * 0.5 - group_end,
+        )
+        centers = [center + shift for center in centers]
+    for shape, center in zip(row_shapes, centers):
+        for table in shape["row"]["tables"]:
+            delta = center - table["position"][2]
+            table["position"][2] = center
+            chair = pair_lookup.get(table["id"])
+            if chair is not None:
+                chair["position"][2] += delta
+
+
+def _furniture_overlap_count(objects):
+    furniture = [
+        item for item in objects if item["category"] in {"table", "chair"}
+    ]
+    overlaps = 0
+    minimum_clearance = float("inf")
+    for index, left in enumerate(furniture):
+        left_x, left_z = _rotated_footprint(left["size"], left["yaw_degrees"])
+        for right in furniture[index + 1:]:
+            if left.get("pair_id") and left.get("pair_id") == right.get("pair_id"):
+                continue
+            right_x, right_z = _rotated_footprint(right["size"], right["yaw_degrees"])
+            gap_x = abs(left["position"][0] - right["position"][0]) - left_x - right_x
+            gap_z = abs(left["position"][2] - right["position"][2]) - left_z - right_z
+            minimum_clearance = min(minimum_clearance, max(gap_x, gap_z))
+            if gap_x < 0 and gap_z < 0:
+                overlaps += 1
+    return overlaps, 0.0 if not math.isfinite(minimum_clearance) else minimum_clearance
+
+
+def _minimum_category_clearance(objects, category):
+    matches = [item for item in objects if item["category"] == category]
+    clearance = float("inf")
+    for index, left in enumerate(matches):
+        left_x, left_z = _rotated_footprint(left["size"], left["yaw_degrees"])
+        for right in matches[index + 1:]:
+            right_x, right_z = _rotated_footprint(right["size"], right["yaw_degrees"])
+            gap_x = abs(left["position"][0] - right["position"][0]) - left_x - right_x
+            gap_z = abs(left["position"][2] - right["position"][2]) - left_z - right_z
+            clearance = min(clearance, max(gap_x, gap_z))
+    return 0.0 if not math.isfinite(clearance) else clearance
+
+
+def _bound_furniture_groups(objects, pair_lookup, width, depth, warnings):
+    paired_chairs = {chair["id"] for chair in pair_lookup.values()}
+    for table in (item for item in objects if item["category"] == "table"):
+        chair = pair_lookup.get(table["id"])
+        minimum_x, maximum_x, minimum_z, maximum_z = _pair_extents(table, chair)
+        span_x = maximum_x - minimum_x
+        span_z = maximum_z - minimum_z
+        if chair is not None and (span_x > width or span_z > depth):
+            scale_x = min(1.0, width * 0.96 / max(span_x, 0.001))
+            scale_z = min(1.0, depth * 0.96 / max(span_z, 0.001))
+            footprint_scale = min(scale_x, scale_z)
+            table["size"][0] *= footprint_scale
+            table["size"][2] *= footprint_scale
+            chair["size"][0] *= footprint_scale
+            chair["size"][2] *= footprint_scale
+            chair["position"][0] = table["position"][0] + (
+                chair["position"][0] - table["position"][0]) * footprint_scale
+            chair["position"][2] = table["position"][2] + (
+                chair["position"][2] - table["position"][2]) * footprint_scale
+            minimum_x, maximum_x, minimum_z, maximum_z = _pair_extents(
+                table, chair)
+            warnings.append(f"{table['name']} 桌椅组合超出房间，已同比缩小占地与相对偏移")
+        lower_x = -width * 0.5 - table["position"][0] - minimum_x
+        upper_x = width * 0.5 - table["position"][0] - maximum_x
+        lower_z = -depth * 0.5 - table["position"][2] - minimum_z
+        upper_z = depth * 0.5 - table["position"][2] - maximum_z
+        delta_x = min(max(0.0, lower_x), upper_x)
+        delta_z = min(max(0.0, lower_z), upper_z)
+        table["position"][0] += delta_x
+        table["position"][2] += delta_z
+        if chair is not None:
+            chair["position"][0] += delta_x
+            chair["position"][2] += delta_z
+    for chair in (
+        item for item in objects
+        if item["category"] == "chair" and item["id"] not in paired_chairs
+    ):
+        half_x, half_z = _rotated_footprint(chair["size"], chair["yaw_degrees"])
+        chair["position"][0] = min(
+            max(chair["position"][0], -width * 0.5 + half_x),
+            width * 0.5 - half_x,
+        )
+        chair["position"][2] = min(
+            max(chair["position"][2], -depth * 0.5 + half_z),
+            depth * 0.5 - half_z,
+        )
+
+
+def _solve_furniture_layout(objects, width, depth, warnings):
+    input_furniture = sum(
+        item["category"] in {"table", "chair"} for item in objects)
+    objects, deduplicated = _deduplicate_furniture(objects, warnings)
+    pairs = _assign_table_chair_pairs(objects, warnings)
+    overlaps_before, _ = _furniture_overlap_count(objects)
+    pair_lookup = {}
+    for table, chair in pairs:
+        pair_lookup[table["id"]] = chair
+        dx, dz = _chair_pair_offset(table, chair)
+        chair["position"][0] = table["position"][0] + dx
+        chair["position"][2] = table["position"][2] + dz
+        chair["projection_source"] = "image_contact_pair_solver"
+    tables = [item for item in objects if item["category"] == "table"]
+    observed_tables = [
+        table for table in tables
+        if (
+            _observation_point(table) is not None
+            or _observation_point(pair_lookup.get(table["id"], {})) is not None
+        )
+    ]
+    rows = _cluster_rows(observed_tables, pair_lookup) if observed_tables else []
+    for row in rows:
+        _pack_row_x(row, pair_lookup, width)
+    if rows:
+        _pack_rows_z(rows, pair_lookup, depth)
+    _bound_furniture_groups(objects, pair_lookup, width, depth, warnings)
+    overlaps, minimum_clearance = _furniture_overlap_count(objects)
+    if overlaps:
+        warnings.append(f"全局布局后仍有 {overlaps} 组非配对家具包围盒重叠")
+    return objects, {
+        "input_furniture": input_furniture,
+        "output_furniture": sum(
+            item["category"] in {"table", "chair"} for item in objects),
+        "deduplicated_furniture": deduplicated,
+        "table_chair_pairs": len(pairs),
+        "furniture_rows": len(rows),
+        "initial_furniture_overlaps": overlaps_before,
+        "residual_furniture_overlaps": overlaps,
+        "minimum_furniture_clearance_m": minimum_clearance,
+        "minimum_table_clearance_m": _minimum_category_clearance(
+            objects, "table"),
+        "minimum_chair_clearance_m": _minimum_category_clearance(
+            objects, "chair"),
+    }
 
 
 def normalize_reconstruction_layout(raw, known_room_width_m=0.0, max_objects=36,
@@ -616,6 +1050,9 @@ def normalize_reconstruction_layout(raw, known_room_width_m=0.0, max_objects=36,
             "id": f"scene-object-{index + 1:02d}",
             "name": name,
             "category": category,
+            "instance_id": str(item.get("instance_id") or "").strip(),
+            "paired_instance_id": str(
+                item.get("paired_instance_id") or "").strip(),
             "wall": wall,
             "image_bbox": image_bbox,
             "floor_contact": floor_contact,
@@ -634,28 +1071,10 @@ def normalize_reconstruction_layout(raw, known_room_width_m=0.0, max_objects=36,
         anchor = _interaction_anchor(category, position, size)
         if anchor:
             entity["interaction_anchor"] = anchor
-        duplicate_observation = next((
-            existing for existing in objects
-            if existing["category"] == category
-            and (
-                image_bbox is not None
-                and existing.get("image_bbox") == image_bbox
-                and (
-                    category not in _MOUNTED_CATEGORIES
-                    or existing.get("wall") == wall
-                )
-                or floor_contact is not None
-                and existing.get("floor_contact") is not None
-                and abs(existing["floor_contact"][0] - floor_contact[0]) < 0.015
-                and abs(existing["floor_contact"][1] - floor_contact[1]) < 0.015
-            )
-        ), None)
-        if duplicate_observation is not None:
-            warnings.append(f"{name} 与 {duplicate_observation['name']} 使用重复图像区域，已去重")
-            continue
         objects.append(entity)
 
-    _separate_furniture_pairs(objects, depth, warnings)
+    objects, layout_quality = _solve_furniture_layout(
+        objects, width, depth, warnings)
     for entity in objects:
         entity.pop("interaction_anchor", None)
         anchor = _interaction_anchor(
@@ -672,6 +1091,7 @@ def normalize_reconstruction_layout(raw, known_room_width_m=0.0, max_objects=36,
         },
         "camera": normalized_camera,
         "objects": objects,
+        "layout_quality": layout_quality,
         "warnings": warnings,
     }
 
@@ -745,6 +1165,8 @@ def build_scene_documents(layout, model, request_id, image_hashes):
                 "image_bbox": entity.get("image_bbox"),
                 "floor_contact": entity.get("floor_contact"),
                 "projection_source": entity.get("projection_source", "model_3d"),
+                "pair_id": entity.get("pair_id", ""),
+                "paired_entity_id": entity.get("paired_entity_id", ""),
             },
         })
     scene = {
@@ -800,6 +1222,7 @@ def build_scene_documents(layout, model, request_id, image_hashes):
             "object_position": "floor-footprint center",
         },
         "room": layout["room"],
+        "layout_quality": layout.get("layout_quality", {}),
         "entities": entities,
         "interaction_anchors": [
             {"entity_id": entity["id"], **entity["interaction_anchor"]}

@@ -514,7 +514,7 @@ def _previs_run_reconstruction_job(job_id, image_paths, upload_dir, options):
             options["max_objects"],
             "Enabled",
             additional_guidance=options.get("additional_guidance", ""),
-            model=options.get("model", "hunyuan-vision-1.5-instruct"),
+            model=options.get("model", "hunyuan-t1-vision-20250916"),
             request_timeout=options.get("request_timeout", 240),
             filename=options.get("filename", "director_reconstruction"),
         )
@@ -1847,7 +1847,7 @@ def _register_http_routes():
             request_timeout = int(fields.get("request_timeout", 240) or 240)
             if not 60 <= request_timeout <= 600:
                 raise ValueError("request_timeout 必须在 60-600 秒之间")
-            model = fields.get("model", "hunyuan-vision-1.5-instruct")
+            model = fields.get("model", "hunyuan-t1-vision-20250916")
             if model not in {
                 "hunyuan-vision-1.5-instruct",
                 "hunyuan-t1-vision-20250916",
@@ -3052,7 +3052,7 @@ class TencentVODImageToEditable3DScene:
             "model": ([
                 "hunyuan-vision-1.5-instruct",
                 "hunyuan-t1-vision-20250916",
-            ], {"default": "hunyuan-vision-1.5-instruct"}),
+            ], {"default": "hunyuan-t1-vision-20250916"}),
             "region": ("STRING", {"default": ""}),
             "endpoint": ("STRING", {
                 "default": "hunyuan.ai.tencentcloudapi.com",
@@ -3091,7 +3091,7 @@ class TencentVODImageToEditable3DScene:
             raise ValueError(f"可编辑场景重建仅支持 1-3 张参考图，当前有 {view_count} 张")
         secret_id, secret_key = _resolve_secret_pair(
             kwargs.get("secret_id"), kwargs.get("secret_key"))
-        model = kwargs.get("model") or "hunyuan-vision-1.5-instruct"
+        model = kwargs.get("model") or "hunyuan-t1-vision-20250916"
         encoded_images = []
         image_hashes = []
         for index in range(view_count):
@@ -3161,9 +3161,19 @@ class TencentVODImageToEditable3DScene:
             1 for entity in manifest["entities"]
             if str(entity.get("projection_source", "")).startswith("image_contact")
         )
+        quality = manifest.get("layout_quality", {})
         report_lines = [
             f"已生成 {len(manifest['entities'])} 个独立白模对象",
             f"主图约束：{image_aligned_count} 个对象按图像落地点/墙面校准",
+            "家具布局："
+            f"{quality.get('input_furniture', 0)} 个观测 → "
+            f"{quality.get('output_furniture', 0)} 个实例，"
+            f"{quality.get('table_chair_pairs', 0)} 组桌椅配对，"
+            f"碰撞 {quality.get('initial_furniture_overlaps', 0)} → "
+            f"{quality.get('residual_furniture_overlaps', 0)}，"
+            f"桌/椅最小净距 "
+            f"{quality.get('minimum_table_clearance_m', 0):.2f}m/"
+            f"{quality.get('minimum_chair_clearance_m', 0):.2f}m",
             f"房间估计：{manifest['room']['width']:.2f}m × "
             f"{manifest['room']['depth']:.2f}m × {manifest['room']['height']:.2f}m",
             f"尺度来源：{manifest['room']['scale_source']}",

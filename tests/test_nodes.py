@@ -1133,6 +1133,255 @@ check("editable 3d: soft edge bound stays continuous and monotonic",
       edge_samples == sorted(edge_samples)
       and max(edge_samples) <= 5.5
       and edge_samples[3] - edge_samples[2] < 0.001)
+dense_objects = []
+for row_index, contact_y in enumerate((0.85, 0.72, 0.59, 0.46)):
+    for column_index, contact_x in enumerate((0.3, 0.7)):
+        instance = row_index * 2 + column_index + 1
+        table_bbox = [
+            contact_x - 0.11, contact_y - 0.18,
+            contact_x + 0.11, contact_y,
+        ]
+        chair_bbox = [
+            contact_x - 0.06, contact_y - 0.14,
+            contact_x + 0.06, min(0.98, contact_y + 0.03),
+        ]
+        dense_objects.extend([
+            {
+                "name": f"课桌 {instance}", "category": "table",
+                "instance_id": f"table-{instance}",
+                "position": [0, 0, 0], "size": [1.2, 0.75, 0.6],
+                "confidence": 0.9, "evidence": "observed",
+                "image_bbox": table_bbox,
+                "floor_contact": [contact_x, contact_y],
+            },
+            {
+                "name": f"椅子 {instance}", "category": "chair",
+                "instance_id": f"chair-{instance}",
+                "paired_instance_id": f"table-{instance}",
+                "position": [0, 0, 0], "size": [0.5, 0.85, 0.5],
+                "confidence": 0.88, "evidence": "observed",
+                "image_bbox": chair_bbox,
+                "floor_contact": [contact_x, min(0.98, contact_y + 0.03)],
+            },
+        ])
+for duplicate_index in range(6):
+    source_table = dense_objects[duplicate_index * 2]
+    source_chair = dense_objects[duplicate_index * 2 + 1]
+    for source, suffix in ((source_table, "桌"), (source_chair, "椅")):
+        duplicate = dict(source)
+        duplicate["name"] = f"重复{suffix} {duplicate_index + 1}"
+        duplicate["confidence"] = 0.55
+        duplicate["image_bbox"] = [
+            source["image_bbox"][0] + 0.004,
+            source["image_bbox"][1] + 0.004,
+            source["image_bbox"][2] + 0.004,
+            source["image_bbox"][3] + 0.004,
+        ]
+        duplicate["floor_contact"] = [
+            source["floor_contact"][0] + 0.004,
+            source["floor_contact"][1] + 0.004,
+        ]
+        dense_objects.append(duplicate)
+dense_layout = {
+    "room": {"width": 8, "depth": 8, "height": 3, "confidence": 0.82},
+    "camera": projection_layout["camera"],
+    "objects": dense_objects,
+}
+dense_normalized = nodes._normalize_reconstruction_layout(
+    dense_layout, known_room_width_m=0, max_objects=36,
+    image_aspect_ratio=16 / 9)
+dense_tables = [
+    item for item in dense_normalized["objects"] if item["category"] == "table"]
+dense_chairs = [
+    item for item in dense_normalized["objects"] if item["category"] == "chair"]
+dense_quality = dense_normalized["layout_quality"]
+check("editable 3d: dense furniture observations deduplicate by image instance",
+      len(dense_tables) == 8
+      and len(dense_chairs) == 8
+      and dense_quality["input_furniture"] == 28
+      and dense_quality["output_furniture"] == 16
+      and dense_quality["deduplicated_furniture"] == 12)
+check("editable 3d: dense furniture uses one-to-one table-chair pairs",
+      dense_quality["table_chair_pairs"] == 8
+      and len({item["pair_id"] for item in dense_tables}) == 8
+      and all(item.get("paired_entity_id") for item in dense_chairs))
+explicit_cross_layout = {
+    "room": {"width": 8, "depth": 8, "height": 3, "confidence": 0.8},
+    "camera": projection_layout["camera"],
+    "objects": [
+        {
+            "name": "显式桌 1", "category": "table",
+            "instance_id": "table-1",
+            "position": [-2, 0, 0], "size": [1.2, 0.75, 0.6],
+            "confidence": 0.8, "evidence": "observed",
+            "floor_contact": [0.2, 0.7],
+        },
+        {
+            "name": "显式桌 2", "category": "table",
+            "instance_id": "table-2",
+            "position": [2, 0, 0], "size": [1.2, 0.75, 0.6],
+            "confidence": 0.8, "evidence": "observed",
+            "floor_contact": [0.8, 0.7],
+        },
+        {
+            "name": "显式椅 1", "category": "chair",
+            "instance_id": "chair-1", "paired_instance_id": "table-1",
+            "position": [2, 0, 0], "size": [0.5, 0.85, 0.5],
+            "confidence": 0.8, "evidence": "observed",
+            "floor_contact": [0.8, 0.72],
+        },
+        {
+            "name": "显式椅 2", "category": "chair",
+            "instance_id": "chair-2", "paired_instance_id": "table-2",
+            "position": [-2, 0, 0], "size": [0.5, 0.85, 0.5],
+            "confidence": 0.8, "evidence": "observed",
+            "floor_contact": [0.2, 0.72],
+        },
+    ],
+}
+explicit_cross_normalized = nodes._normalize_reconstruction_layout(
+    explicit_cross_layout, max_objects=12, image_aspect_ratio=16 / 9)
+explicit_cross = {
+    item["instance_id"]: item for item in explicit_cross_normalized["objects"]
+}
+check("editable 3d: unique chair-declared pairs override geometric proximity",
+      explicit_cross["table-1"]["paired_entity_id"]
+      == explicit_cross["chair-1"]["id"]
+      and explicit_cross["table-2"]["paired_entity_id"]
+      == explicit_cross["chair-2"]["id"])
+oversized_pair_layout = {
+    "room": {"width": 1, "depth": 2, "height": 3, "confidence": 0.8},
+    "camera": projection_layout["camera"],
+    "objects": [
+        {
+            "name": "超宽桌", "category": "table",
+            "instance_id": "wide-table", "paired_instance_id": "wide-chair",
+            "position": [0, 0, 0], "size": [1, 0.75, 0.6],
+            "yaw_degrees": 45,
+            "confidence": 0.8, "evidence": "observed",
+            "floor_contact": [0.5, 0.7],
+        },
+        {
+            "name": "超宽椅", "category": "chair",
+            "instance_id": "wide-chair", "paired_instance_id": "wide-table",
+            "position": [0, 0, 0], "size": [0.5, 0.85, 0.5],
+            "yaw_degrees": 45,
+            "confidence": 0.8, "evidence": "observed",
+            "floor_contact": [0.9, 0.72],
+        },
+    ],
+}
+oversized_pair = nodes._normalize_reconstruction_layout(
+    oversized_pair_layout, max_objects=12, image_aspect_ratio=1)
+check("editable 3d: oversized furniture pair is scaled inside room",
+      all(
+          abs(item["position"][0])
+          + editable_scene._rotated_footprint(
+              item["size"], item["yaw_degrees"])[0] <= 0.5 + 1e-6
+          and abs(item["position"][2])
+          + editable_scene._rotated_footprint(
+              item["size"], item["yaw_degrees"])[1] <= 1.0 + 1e-6
+          for item in oversized_pair["objects"]
+      )
+      and any("桌椅组合超出房间" in warning
+              for warning in oversized_pair["warnings"]))
+check("editable 3d: global furniture solver removes non-pair overlaps",
+      dense_quality["initial_furniture_overlaps"] > 0
+      and dense_quality["residual_furniture_overlaps"] == 0)
+dense_rows = {}
+for table in dense_tables:
+    row = round(table["floor_contact"][1], 2)
+    dense_rows.setdefault(row, []).append(table)
+check("editable 3d: global furniture solver preserves image ordering",
+      all(
+          sorted(row_tables, key=lambda item: item["floor_contact"][0])[0]["position"][0]
+          < sorted(row_tables, key=lambda item: item["floor_contact"][0])[1]["position"][0]
+          for row_tables in dense_rows.values()
+      )
+      and [
+          sum(item["position"][2] for item in row_tables) / len(row_tables)
+          for _, row_tables in sorted(dense_rows.items(), reverse=True)
+      ] == sorted(
+          sum(item["position"][2] for item in row_tables) / len(row_tables)
+          for row_tables in dense_rows.values()
+      ))
+check("editable 3d: global furniture solver stays inside room",
+      all(
+          abs(item["position"][0])
+          + editable_scene._rotated_footprint(
+              item["size"], item["yaw_degrees"])[0] <= 4.0 + 1e-6
+          and abs(item["position"][2])
+          + editable_scene._rotated_footprint(
+              item["size"], item["yaw_degrees"])[1] <= 4.0 + 1e-6
+          for item in dense_normalized["objects"]
+      ))
+conflicting_id_layout = {
+    "room": {"width": 8, "depth": 8, "height": 3, "confidence": 0.8},
+    "camera": projection_layout["camera"],
+    "objects": [
+        {
+            "name": "左侧同名桌", "category": "table", "instance_id": "table-1",
+            "position": [-2, 0, -2], "size": [1.2, 0.75, 0.6],
+            "confidence": 0.8, "evidence": "observed",
+            "image_bbox": [0.05, 0.65, 0.25, 0.85],
+            "floor_contact": [0.15, 0.85],
+        },
+        {
+            "name": "右侧同名桌", "category": "table", "instance_id": "table-1",
+            "position": [2, 0, 2], "size": [1.2, 0.75, 0.6],
+            "confidence": 0.8, "evidence": "observed",
+            "image_bbox": [0.65, 0.35, 0.85, 0.55],
+            "floor_contact": [0.75, 0.55],
+        },
+    ],
+}
+conflicting_id_normalized = nodes._normalize_reconstruction_layout(
+    conflicting_id_layout, max_objects=12, image_aspect_ratio=16 / 9)
+check("editable 3d: conflicting duplicate IDs do not delete distant furniture",
+      len(conflicting_id_normalized["objects"]) == 2
+      and any("instance_id 重复但图像位置冲突" in warning
+              for warning in conflicting_id_normalized["warnings"]))
+unobserved_layout = {
+    "room": {"width": 8, "depth": 8, "height": 3, "confidence": 0.8},
+    "camera": projection_layout["camera"],
+    "objects": [
+        {
+            "name": "无观测前桌", "category": "table",
+            "position": [-2, 0, -2], "size": [1.2, 0.75, 0.6],
+            "confidence": 0.7, "evidence": "inferred",
+        },
+        {
+            "name": "无观测后桌", "category": "table",
+            "position": [2, 0, 2], "size": [1.2, 0.75, 0.6],
+            "confidence": 0.7, "evidence": "inferred",
+        },
+    ],
+}
+unobserved_normalized = nodes._normalize_reconstruction_layout(
+    unobserved_layout, max_objects=12, image_aspect_ratio=16 / 9)
+check("editable 3d: unobserved furniture keeps model depth separation",
+      unobserved_normalized["objects"][0]["position"][2] == -2
+      and unobserved_normalized["objects"][1]["position"][2] == 2
+      and unobserved_normalized["layout_quality"]["furniture_rows"] == 0)
+overfull_layout = {
+    "room": {"width": 2, "depth": 2, "height": 3, "confidence": 0.8},
+    "camera": projection_layout["camera"],
+    "objects": [
+        {
+            "name": f"拥挤桌 {index}", "category": "table",
+            "position": [0, 0, 0], "size": [1.2, 0.75, 0.6],
+            "confidence": 0.8, "evidence": "observed",
+            "image_bbox": [0.2, 0.1 * index, 0.8, 0.1 * index + 0.08],
+            "floor_contact": [0.5, 0.1 * index + 0.08],
+        }
+        for index in range(5)
+    ],
+}
+overfull_normalized = nodes._normalize_reconstruction_layout(
+    overfull_layout, max_objects=12, image_aspect_ratio=1)
+check("editable 3d: residual overlaps report non-positive clearance",
+      overfull_normalized["layout_quality"]["residual_furniture_overlaps"] > 0
+      and overfull_normalized["layout_quality"]["minimum_furniture_clearance_m"] <= 0)
 ray_camera = {
     "position": [0, 1.7, -5],
     "target": [0, 1.2, 0],
@@ -1176,7 +1425,9 @@ parsed_editable_scene = nodes._parse_previs_scene(
     json.dumps(editable_scene, ensure_ascii=False))
 check("editable 3d: semantic category survives previs parsing",
       parsed_editable_scene["objects"][4]["semantic"]["category"] == "table"
-      and "projection_source" in parsed_editable_scene["objects"][4]["semantic"])
+      and "projection_source" in parsed_editable_scene["objects"][4]["semantic"]
+      and editable_manifest["layout_quality"]
+      == normalized_editable["layout_quality"])
 check("editable 3d: reference camera generated",
       editable_camera["active_camera"] == "camera-reference"
       and len(editable_camera["cameras"][0]["keyframes"]) == 2)

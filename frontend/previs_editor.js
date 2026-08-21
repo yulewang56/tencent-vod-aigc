@@ -1359,7 +1359,7 @@ function openEditor(node) {
       knownRoomWidth: 0,
       maxObjects: 36,
       additionalGuidance: "",
-      model: "hunyuan-vision-1.5-instruct",
+      model: "hunyuan-t1-vision-20250916",
       confirmed: false,
       preserveProduction: true,
       images: [null, null, null],
@@ -3752,6 +3752,12 @@ function renderSceneSourcePanel(container, state, runtime) {
       ["室内通用", "教室", "办公室", "客厅", "卧室", "展厅", "餐厅", "摄影棚"],
       reconstruction.sceneType,
       (value) => { reconstruction.sceneType = value; },
+    ));
+    details.appendChild(selectInput(
+      "视觉解析模型（T1 精度更高）",
+      ["hunyuan-t1-vision-20250916", "hunyuan-vision-1.5-instruct"],
+      reconstruction.model,
+      (value) => { reconstruction.model = value; },
     ));
     details.appendChild(numberInput(
       "已知房间宽度（米，0=视觉估算）",
