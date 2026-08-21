@@ -968,7 +968,11 @@ check("editable 3d: prompt avoids room/camera numeric anchoring",
       and '"position": [0.0, 1.7, -7.0]' not in editable_prompt
       and "wall must be left/right/back/front" in editable_prompt
       and "image_bbox" in editable_prompt
-      and "floor_contact" in editable_prompt)
+      and "floor_contact" in editable_prompt
+      and "horizon_y" in editable_prompt
+      and "principal_point_x" in editable_prompt
+      and "clearly visible major architectural anchor" in editable_prompt
+      and "board or window" in editable_prompt)
 normalized_editable = nodes._normalize_reconstruction_layout(
     extracted_editable, known_room_width_m=12, max_objects=12)
 check("editable 3d: known width rescales layout",
@@ -1014,7 +1018,7 @@ prior_layout["objects"] = [
     },
     {
         "name": "blackboard", "category": "blackboard", "wall": "right",
-        "position": [3.5, 2.5, 0], "size": [3, 1, 2],
+        "position": [3.5, 2.5, 0], "size": [3, 1, 0],
         "confidence": 0.9, "evidence": "observed", "movable": False,
     },
 ]
@@ -1030,6 +1034,7 @@ check("editable 3d: boards classify and attach to declared wall",
       and prior_normalized["objects"][2]["wall"] == "right"
       and prior_normalized["objects"][2]["position"][0] == 4
       and prior_normalized["objects"][2]["size"][0] <= 0.14
+      and prior_normalized["objects"][2]["size"][0] >= 0.04
       and prior_normalized["objects"][2]["movable"] is False)
 projection_layout = {
     "room": {"width": 12, "depth": 12, "height": 3, "confidence": 0.8},
@@ -1315,6 +1320,31 @@ check("editable 3d: global furniture solver stays inside room",
               item["size"], item["yaw_degrees"])[1] <= 4.0 + 1e-6
           for item in dense_normalized["objects"]
       ))
+irregular_row_layout = {
+    "room": {"width": 10, "depth": 8, "height": 3, "confidence": 0.8},
+    "camera": projection_layout["camera"],
+    "objects": [
+        {
+            "name": f"非均匀桌 {index + 1}", "category": "table",
+            "position": [0, 0, 0], "size": [0.8, 0.75, 0.5],
+            "confidence": 0.85, "evidence": "observed",
+            "image_bbox": [x - 0.04, 0.55, x + 0.04, 0.72],
+            "floor_contact": [x, 0.72],
+        }
+        for index, x in enumerate((0.18, 0.40, 0.82))
+    ],
+}
+irregular_row = nodes._normalize_reconstruction_layout(
+    irregular_row_layout, max_objects=12, image_aspect_ratio=16 / 9)
+irregular_tables = sorted(
+    irregular_row["objects"], key=lambda item: item["floor_contact"][0])
+irregular_gaps = [
+    irregular_tables[index + 1]["position"][0]
+    - irregular_tables[index]["position"][0]
+    for index in range(2)
+]
+check("editable 3d: row packing preserves non-uniform image gaps",
+      irregular_gaps[1] > irregular_gaps[0] * 1.4)
 conflicting_id_layout = {
     "room": {"width": 8, "depth": 8, "height": 3, "confidence": 0.8},
     "camera": projection_layout["camera"],
@@ -1341,6 +1371,42 @@ check("editable 3d: conflicting duplicate IDs do not delete distant furniture",
       len(conflicting_id_normalized["objects"]) == 2
       and any("instance_id 重复但图像位置冲突" in warning
               for warning in conflicting_id_normalized["warnings"]))
+unsupported_duplicate_objects = [
+        {
+            "id": "unsupported-table",
+            "name": "无证据候选桌", "category": "table",
+            "position": [0.08, 0, 0.06], "size": [1, 0.75, 0.7],
+            "yaw_degrees": 0,
+            "confidence": 0.8, "evidence": "inferred",
+            "image_bbox": None, "floor_contact": None,
+        },
+        {
+            "id": "observed-table",
+            "name": "有证据桌", "category": "table",
+            "position": [0, 0, 0], "size": [1, 0.75, 0.7],
+            "yaw_degrees": 0,
+            "confidence": 0.8, "evidence": "observed",
+            "image_bbox": [0.3, 0.5, 0.6, 0.8],
+            "floor_contact": [0.45, 0.8],
+        },
+]
+unsupported_duplicate, _ = editable_scene._deduplicate_furniture(
+    unsupported_duplicate_objects, [])
+check("editable 3d: unsupported near-copy yields to observed instance",
+      len(unsupported_duplicate) == 1
+      and unsupported_duplicate[0]["name"] == "有证据桌")
+higher_confidence_unsupported = [
+    unsupported_duplicate_objects[1],
+    {
+        **unsupported_duplicate_objects[0],
+        "confidence": 0.95,
+    },
+]
+higher_confidence_deduplicated, _ = editable_scene._deduplicate_furniture(
+    higher_confidence_unsupported, [])
+check("editable 3d: confidence cannot replace the only observed duplicate",
+      len(higher_confidence_deduplicated) == 1
+      and higher_confidence_deduplicated[0]["name"] == "有证据桌")
 unobserved_layout = {
     "room": {"width": 8, "depth": 8, "height": 3, "confidence": 0.8},
     "camera": projection_layout["camera"],
@@ -1392,6 +1458,216 @@ right_ray = editable_scene._image_ray([0.75, 0.75], ray_camera, 16 / 9)
 check("editable 3d: image axes map rightward and downward",
       left_ray[0] < 0 < right_ray[0]
       and left_ray[1] < 0 and right_ray[1] < 0)
+off_center_camera = {**ray_camera, "principal_point_x": 0.62}
+off_center_ray = editable_scene._image_ray(
+    [0.62, 0.5], off_center_camera, 16 / 9)
+off_center_projection = editable_scene._project_image_point(
+    ray_camera["target"], off_center_camera, 16 / 9)
+check("editable 3d: principal point participates in ray and projection",
+      sum(
+          abs(off_center_ray[index] - editable_scene._normalize3([
+              ray_camera["target"][axis] - ray_camera["position"][axis]
+              for axis in range(3)
+          ])[index])
+          for index in range(3)
+      ) < 1e-6
+      and abs(off_center_projection[0] - 0.62) < 1e-6)
+near_tie_objects = [
+    {
+        "name": "近似并列左", "category": "table",
+        "position": [-0.01, 0, 0], "size": [0.8, 0.75, 0.5],
+        "yaw_degrees": 0, "floor_contact": [0.55, 0.7],
+    },
+    {
+        "name": "近似并列右", "category": "table",
+        "position": [0.01, 0, 0], "size": [0.8, 0.75, 0.5],
+        "yaw_degrees": 0, "floor_contact": [0.45, 0.7],
+    },
+]
+near_tie_violations = editable_scene._image_order_violations(
+    near_tie_objects, ray_camera, 16 / 9)
+check("editable 3d: projected near-ties are not false order conflicts",
+      near_tie_violations == (0, 0))
+clear_reversal_objects = [
+    {**near_tie_objects[0], "position": [-1, 0, 0]},
+    {**near_tie_objects[1], "position": [1, 0, 0]},
+]
+clear_reversal = editable_scene._image_order_violations(
+    clear_reversal_objects, ray_camera, 16 / 9)
+check("editable 3d: material image-order reversal remains visible",
+      clear_reversal == (1, 1))
+known_camera = {
+    "position": [0.8, 1.6, -6],
+    "target": [0, 0.8, 1],
+    "fov_degrees": 48,
+}
+camera_test_objects = []
+for index, (x, z) in enumerate(((-1.4, 0), (1.2, 0.4), (-0.8, 2), (1.5, 2.5))):
+    camera_test_objects.append({
+        "id": f"camera-test-{index}",
+        "name": f"相机标定桌 {index}",
+        "category": "table",
+        "position": [x, 0, z],
+        "size": [0.8, 0.75, 0.5],
+        "yaw_degrees": 0,
+        "floor_contact": editable_scene._project_image_point(
+            [x, 0, z], known_camera, 16 / 9),
+    })
+reversed_camera = {
+    "position": [-0.8, 1.6, 6],
+    "target": [0, 0.8, 1],
+    "fov_degrees": 48,
+}
+refined_camera, refined_metrics = editable_scene._refine_reference_camera(
+    camera_test_objects, reversed_camera, 8, 10, 3, 16 / 9, [])
+check("editable 3d: reprojection calibration flips reversed camera",
+      refined_camera["position"][2] < 0
+      and refined_metrics["camera_refined"]
+      and refined_metrics["camera_reprojection_error_percent"] < 4)
+metadata_camera = {
+    **known_camera,
+    "principal_point_x": 0.62,
+}
+metadata_camera["horizon_y"] = editable_scene._projected_horizon_y(
+    metadata_camera, 16 / 9)
+metadata_camera_objects = []
+for index, (x, z) in enumerate(((-1.4, 0), (1.2, 0.4), (-0.8, 2), (1.5, 2.5))):
+    metadata_camera_objects.append({
+        "id": f"metadata-camera-{index}",
+        "name": f"带主点标定桌 {index}",
+        "category": "table",
+        "position": [x, 0, z],
+        "size": [0.8, 0.75, 0.5],
+        "yaw_degrees": 0,
+        "floor_contact": editable_scene._project_image_point(
+            [x, 0, z], metadata_camera, 16 / 9),
+    })
+metadata_reversed = {
+    **reversed_camera,
+    "principal_point_x": metadata_camera["principal_point_x"],
+    "horizon_y": metadata_camera["horizon_y"],
+}
+metadata_refined, metadata_metrics = editable_scene._refine_reference_camera(
+    metadata_camera_objects, metadata_reversed, 8, 10, 3, 16 / 9, [])
+metadata_observations = [
+    ([item["position"][0], 0, item["position"][2]], item["floor_contact"])
+    for item in metadata_camera_objects
+]
+metadata_actual_error = editable_scene._camera_reprojection_error(
+    metadata_refined, metadata_observations, 16 / 9) * 100
+check("editable 3d: refined camera preserves calibration metadata",
+      metadata_refined["principal_point_x"] == 0.62
+      and metadata_refined["horizon_y"] == metadata_camera["horizon_y"]
+      and abs(
+          metadata_metrics["camera_reprojection_error_percent"]
+          - metadata_actual_error
+      ) < 1e-9)
+repeated_camera_objects = [
+    {
+        "id": f"repeated-camera-{index}",
+        "name": f"重复标定点 {index}",
+        "category": "table",
+        "position": [0, 0, 0],
+        "size": [0.8, 0.75, 0.5],
+        "yaw_degrees": 0,
+        "floor_contact": [0.5, 0.7],
+    }
+    for index in range(4)
+]
+_, repeated_camera_metrics = editable_scene._refine_reference_camera(
+    repeated_camera_objects, known_camera, 8, 10, 3, 16 / 9, [])
+check("editable 3d: repeated correspondences cannot validate camera",
+      repeated_camera_metrics["camera_unique_observation_count"] == 1
+      and not repeated_camera_metrics["camera_refined"]
+      and not repeated_camera_metrics["camera_reliable"])
+collinear_camera_objects = [
+    {
+        "id": f"collinear-camera-{index}",
+        "name": f"共线标定点 {index}",
+        "category": "table",
+        "position": [index - 1.5, 0, index - 1.5],
+        "size": [0.8, 0.75, 0.5],
+        "yaw_degrees": 0,
+        "floor_contact": [0.2 + index * 0.15, 0.25 + index * 0.1],
+    }
+    for index in range(4)
+]
+_, collinear_camera_metrics = editable_scene._refine_reference_camera(
+    collinear_camera_objects, known_camera, 8, 10, 3, 16 / 9, [])
+check("editable 3d: collinear correspondences cannot validate camera",
+      collinear_camera_metrics["camera_unique_observation_count"] == 4
+      and not collinear_camera_metrics["camera_refined"]
+      and not collinear_camera_metrics["camera_reliable"])
+classroom_without_architecture = nodes._normalize_reconstruction_layout(
+    editable_raw, known_room_width_m=0, max_objects=12, scene_type="教室")
+check("editable 3d: missing classroom architecture is explicit",
+      classroom_without_architecture["layout_quality"]["window_count"] == 0
+      and classroom_without_architecture["layout_quality"]["board_count"] == 0
+      and classroom_without_architecture["layout_quality"]["previs_fidelity"]
+      == "limited"
+      and "architecture_coverage"
+      in classroom_without_architecture["layout_quality"]["fidelity_limitations"]
+      and any("教室关键建筑锚点缺失" in warning
+              for warning in classroom_without_architecture["warnings"]))
+segmented_window_layout = {
+    "room": {"width": 6, "depth": 5, "height": 3, "confidence": 0.8},
+    "camera": projection_layout["camera"],
+    "objects": [
+        {
+            "name": "窗上段", "category": "window", "wall": "left",
+            "position": [-3, 0.9, 1], "size": [0.1, 0.8, 0.8],
+            "confidence": 0.9, "evidence": "inferred",
+            "image_bbox": [0, 0, 0.2, 0.3],
+        },
+        {
+            "name": "窗下段", "category": "window", "wall": "left",
+            "position": [-3, 0.9, 1], "size": [0.1, 0.8, 0.8],
+            "confidence": 0.9, "evidence": "inferred",
+            "image_bbox": [0, 0.3, 0.2, 0.6],
+        },
+        {
+            "name": "相邻窗", "category": "window", "wall": "left",
+            "position": [-3, 0.9, -0.5], "size": [0.1, 0.8, 0.8],
+            "confidence": 0.9, "evidence": "observed",
+            "image_bbox": [0.2, 0, 0.4, 0.6],
+        },
+    ],
+}
+segmented_windows = nodes._normalize_reconstruction_layout(
+    segmented_window_layout, max_objects=12, image_aspect_ratio=16 / 9)
+merged_window = next(
+    item for item in segmented_windows["objects"]
+    if item["name"] == "窗上段")
+check("editable 3d: overlapping window segments merge, adjacent panes remain",
+      segmented_windows["layout_quality"]["window_count"] == 2
+      and segmented_windows["layout_quality"]["deduplicated_architecture"] == 1
+      and merged_window["image_bbox"] == [0, 0, 0.2, 0.6]
+      and abs(merged_window["size"][1] - 1.6) < 1e-6)
+three_window_segments = [
+    {
+        "id": f"window-segment-{index}",
+        "name": f"窗分段 {index}",
+        "category": "window",
+        "wall": "left",
+        "position": [-3, 0.9 + index * 0.02, 1],
+        "size": [0.1, 0.8, 0.8],
+        "yaw_degrees": 0,
+        "confidence": 0.9,
+        "evidence": "inferred",
+        "opacity": 0.62,
+        "image_bbox": [0, index * 0.2, 0.2, (index + 1) * 0.2],
+        "floor_contact": [0.1, (index + 1) * 0.2],
+    }
+    for index in range(3)
+]
+three_merged_windows, three_removed = (
+    editable_scene._deduplicate_mounted_architecture(
+        three_window_segments, []))
+check("editable 3d: connected window segment chain merges once",
+      three_removed == 2
+      and len(three_merged_windows) == 1
+      and three_merged_windows[0]["image_bbox"][:3] == [0, 0, 0.2]
+      and abs(three_merged_windows[0]["image_bbox"][3] - 0.6) < 1e-6)
 rotated_pair_layout = {
     "room": {"width": 12, "depth": 12, "height": 3, "confidence": 0.8},
     "camera": projection_layout["camera"],

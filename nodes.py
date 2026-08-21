@@ -3141,6 +3141,7 @@ class TencentVODImageToEditable3DScene:
             known_room_width_m=float(known_room_width_m),
             max_objects=int(max_objects),
             image_aspect_ratio=float(image.shape[2]) / float(image.shape[1]),
+            scene_type=scene_type,
         )
         request_id = str(response.get("RequestId") or response.get("Id") or "")
         scene, camera, manifest = _build_scene_documents(
@@ -3174,6 +3175,20 @@ class TencentVODImageToEditable3DScene:
             f"桌/椅最小净距 "
             f"{quality.get('minimum_table_clearance_m', 0):.2f}m/"
             f"{quality.get('minimum_chair_clearance_m', 0):.2f}m",
+            "图像对齐："
+            f"{quality.get('camera_observation_count', 0)} 个落地点，"
+            f"参考机位重投影误差 "
+            f"{quality.get('camera_reprojection_error_percent', 0):.1f}%，"
+            f"关键建筑 {quality.get('major_architecture_count', 0)} 个"
+            f"（窗 {quality.get('window_count', 0)} / "
+            f"板 {quality.get('board_count', 0)} / "
+            f"门 {quality.get('door_count', 0)}）",
+            "预演还原等级："
+            f"{quality.get('previs_fidelity', 'limited')}；"
+            f"图像顺序冲突 "
+            f"{quality.get('image_order_violations', 0)}/"
+            f"{quality.get('image_order_comparisons', 0)}"
+            f"（{quality.get('image_order_violation_ratio', 0) * 100:.1f}%）",
             f"房间估计：{manifest['room']['width']:.2f}m × "
             f"{manifest['room']['depth']:.2f}m × {manifest['room']['height']:.2f}m",
             f"尺度来源：{manifest['room']['scale_source']}",

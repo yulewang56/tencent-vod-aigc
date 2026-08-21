@@ -70,11 +70,16 @@ Coordinate system:
 - Keep every object inside or directly against the room bounds.
 - For door, window, and board objects, set wall to left/right/back/front.
   Objects visible on the same physical wall must use the same wall value.
+- Inventory every clearly visible major architectural anchor: each window bay,
+  door, board, and large opening gets its own tight image_bbox. A classroom
+  result containing furniture but omitting a clearly visible board or window
+  is incomplete.
 - Return at most {max_objects} objects.
 
 Use these exact JSON fields without copying any preset scene dimensions:
 - room: width, depth, height, confidence (all numeric)
-- camera: position (3 numbers), target (3 numbers), fov_degrees
+- camera: position (3 numbers), target (3 numbers), fov_degrees, confidence,
+  horizon_y, and principal_point_x
 - objects: array of objects containing name, category, position (3 numbers),
   size (3 numbers), yaw_degrees, confidence, evidence, movable, wall,
   image_bbox, floor_contact, instance_id, and paired_instance_id
@@ -89,6 +94,9 @@ Use these exact JSON fields without copying any preset scene dimensions:
   edge. Never reuse one floor_contact.y for furniture in different depth rows.
 - window objects also include sill_height_m, the estimated physical distance
   from the floor to the window's lower edge
+- horizon_y and principal_point_x are normalized primary-image coordinates.
+  Estimate them from wall, window, board, tabletop, and floor-line convergence;
+  do not default both to 0.5 unless the image is genuinely level and centered.
 - category must be one of:
   board, door, window, table, chair, storage, appliance, furniture, prop, unknown
 - wall must be left/right/back/front for mounted objects and an empty string otherwise
@@ -105,6 +113,8 @@ Before replying, verify:
   inventory, including partially occluded instances
 - every classroom chair is paired to at most one table, and every table to at
   most one chair
+- all clearly visible window bays and the classroom board are present as
+  separate architecture objects with tight image boxes
 - room and camera numbers were inferred from the image, not copied from this instruction
 
 Return only one valid JSON object with those fields and no Markdown.
@@ -213,7 +223,8 @@ def _image_ray(point, camera, aspect_ratio):
     if right is None:
         return None
     up = _normalize3(_cross3(forward, right))
-    x_ndc = (point[0] - 0.5) * 2.0
+    principal_x = camera.get("principal_point_x", 0.5)
+    x_ndc = (point[0] - principal_x) * 2.0
     y_ndc = (0.5 - point[1]) * 2.0
     tangent = math.tan(math.radians(camera["fov_degrees"]) * 0.5)
     direction = [
@@ -236,6 +247,273 @@ def _ground_point_from_image(point, camera, aspect_ratio):
         camera["position"][index] + direction[index] * distance
         for index in range(3)
     ]
+
+
+def _project_image_point(point, camera, aspect_ratio):
+    forward = _normalize3([
+        camera["target"][index] - camera["position"][index] for index in range(3)
+    ])
+    if forward is None:
+        return None
+    right = _normalize3(_cross3([0, 1, 0], forward))
+    if right is None:
+        return None
+    up = _normalize3(_cross3(forward, right))
+    relative = [
+        point[index] - camera["position"][index] for index in range(3)
+    ]
+    depth = sum(relative[index] * forward[index] for index in range(3))
+    if depth <= 1e-4:
+        return None
+    tangent = math.tan(math.radians(camera["fov_degrees"]) * 0.5)
+    if tangent <= 1e-6:
+        return None
+    horizontal = sum(relative[index] * right[index] for index in range(3))
+    vertical = sum(relative[index] * up[index] for index in range(3))
+    return [
+        camera.get("principal_point_x", 0.5)
+        + horizontal / (depth * tangent * aspect_ratio * 2.0),
+        0.5 - vertical / (depth * tangent * 2.0),
+    ]
+
+
+def _projected_horizon_y(camera, aspect_ratio):
+    forward = _normalize3([
+        camera["target"][index] - camera["position"][index] for index in range(3)
+    ])
+    if forward is None:
+        return None
+    ground_forward = _normalize3([forward[0], 0.0, forward[2]])
+    if ground_forward is None:
+        return None
+    projected = _project_image_point([
+        camera["position"][0] + ground_forward[0] * 1000.0,
+        camera["position"][1],
+        camera["position"][2] + ground_forward[2] * 1000.0,
+    ], camera, aspect_ratio)
+    return projected[1] if projected is not None else None
+
+
+def _camera_fit_error(camera, observations, aspect_ratio):
+    squared_error = 0.0
+    for world_point, image_point in observations:
+        projected = _project_image_point(world_point, camera, aspect_ratio)
+        if projected is None:
+            return 1000.0
+        squared_error += (
+            (projected[0] - image_point[0]) ** 2
+            + (projected[1] - image_point[1]) ** 2
+        )
+    mean_error = squared_error / max(1, len(observations))
+    horizon_penalty = 0.0
+    projected_horizon = _projected_horizon_y(camera, aspect_ratio)
+    if projected_horizon is not None and "horizon_y" in camera:
+        horizon_penalty = (
+            projected_horizon - camera["horizon_y"]) ** 2 * 0.25
+    height_penalty = ((camera["position"][1] - 1.6) / 3.0) ** 2 * 0.002
+    fov_penalty = ((camera["fov_degrees"] - 55.0) / 60.0) ** 2 * 0.001
+    return mean_error + horizon_penalty + height_penalty + fov_penalty
+
+
+def _camera_reprojection_error(camera, observations, aspect_ratio):
+    errors = []
+    for world_point, image_point in observations:
+        projected = _project_image_point(world_point, camera, aspect_ratio)
+        if projected is None:
+            return 1000.0
+        errors.append(math.hypot(
+            projected[0] - image_point[0],
+            projected[1] - image_point[1],
+        ))
+    return sum(errors) / max(1, len(errors))
+
+
+def _image_order_violations(objects, camera, aspect_ratio):
+    observations = []
+    for entity in objects:
+        observed = _observation_point(entity)
+        if observed is None or entity["category"] in _MOUNTED_CATEGORIES:
+            continue
+        projected = _project_image_point(
+            [entity["position"][0], 0.0, entity["position"][2]],
+            camera,
+            aspect_ratio,
+        )
+        if projected is not None:
+            observations.append((observed, projected))
+    violations = 0
+    comparisons = 0
+    for index, (left_observed, left_projected) in enumerate(observations):
+        for right_observed, right_projected in observations[index + 1:]:
+            for axis in (0, 1):
+                observed_delta = left_observed[axis] - right_observed[axis]
+                if abs(observed_delta) < 0.04:
+                    continue
+                projected_delta = left_projected[axis] - right_projected[axis]
+                if abs(projected_delta) < 0.04:
+                    continue
+                comparisons += 1
+                if observed_delta * projected_delta < 0:
+                    violations += 1
+    return violations, comparisons
+
+
+def _has_non_collinear_support(points, minimum_double_area):
+    for first in range(len(points) - 2):
+        ax, ay = points[first]
+        for second in range(first + 1, len(points) - 1):
+            bx, by = points[second]
+            for third in range(second + 1, len(points)):
+                cx, cy = points[third]
+                double_area = abs(
+                    (bx - ax) * (cy - ay) - (by - ay) * (cx - ax))
+                if double_area >= minimum_double_area:
+                    return True
+    return False
+
+
+def _refine_reference_camera(objects, camera, width, depth, height,
+                             aspect_ratio, warnings):
+    observations = [
+        ([entity["position"][0], 0.0, entity["position"][2]], point)
+        for entity in objects
+        if entity["category"] not in _MOUNTED_CATEGORIES
+        and (point := _observation_point(entity)) is not None
+    ]
+    metrics = {
+        "camera_observation_count": len(observations),
+        "camera_unique_observation_count": 0,
+        "camera_refined": False,
+        "camera_reprojection_error_percent": 0.0,
+        "camera_reliable": False,
+    }
+    if len(observations) < 4:
+        warnings.append("图像落地点少于 4 个，参考机位无法可靠重投影校准")
+        return camera, metrics
+
+    unique_observations = {
+        tuple(round(component, 4) for point in observation for component in point)
+        for observation in observations
+    }
+    metrics["camera_unique_observation_count"] = len(unique_observations)
+    world_x = [world[0] for world, _ in observations]
+    world_z = [world[2] for world, _ in observations]
+    image_x = [image[0] for _, image in observations]
+    image_y = [image[1] for _, image in observations]
+    world_points = [(world[0], world[2]) for world, _ in observations]
+    image_points = [tuple(image) for _, image in observations]
+    distributed = (
+        len(unique_observations) >= 4
+        and max(world_x) - min(world_x) >= max(0.2, width * 0.05)
+        and max(world_z) - min(world_z) >= max(0.2, depth * 0.05)
+        and max(image_x) - min(image_x) >= 0.08
+        and max(image_y) - min(image_y) >= 0.05
+        and _has_non_collinear_support(
+            world_points, max(0.02, width * depth * 0.002))
+        and _has_non_collinear_support(image_points, 0.002)
+    )
+    if not distributed:
+        warnings.append("图像落地点缺少独立的横向/纵深分布，参考机位无法可靠重投影校准")
+        return camera, metrics
+
+    target = camera["target"]
+    camera_metadata = {
+        key: camera[key]
+        for key in ("horizon_y", "principal_point_x")
+        if key in camera
+    }
+    mirrored = {
+        "position": [
+            target[0] * 2.0 - camera["position"][0],
+            camera["position"][1],
+            target[2] * 2.0 - camera["position"][2],
+        ],
+        "target": list(target),
+        "fov_degrees": camera["fov_degrees"],
+        **camera_metadata,
+    }
+    convention_camera = {
+        "position": [0.0, min(max(1.5, height * 0.5), 2.0), -depth * 0.55],
+        "target": [0.0, min(max(0.65, height * 0.28), 1.2), 0.0],
+        "fov_degrees": camera["fov_degrees"],
+        **camera_metadata,
+    }
+    candidates = [
+        {
+            "position": list(camera["position"]),
+            "target": list(camera["target"]),
+            "fov_degrees": camera["fov_degrees"],
+            **camera_metadata,
+        },
+        mirrored,
+        convention_camera,
+    ]
+    bounds = [
+        (-width * 0.85, width * 0.85),
+        (0.8, min(3.0, height)),
+        (-depth * 0.85, depth * 0.85),
+        (-width * 0.5, width * 0.5),
+        (0.2, min(1.8, height)),
+        (-depth * 0.5, depth * 0.5),
+        (22.0, 90.0),
+    ]
+    steps = [
+        width * 0.18, 0.25, depth * 0.18,
+        width * 0.1, 0.18, depth * 0.1, 8.0,
+    ]
+
+    def values(candidate):
+        return [
+            *candidate["position"],
+            *candidate["target"],
+            candidate["fov_degrees"],
+        ]
+
+    def from_values(candidate_values):
+        return {
+            "position": candidate_values[:3],
+            "target": candidate_values[3:6],
+            "fov_degrees": candidate_values[6],
+            **camera_metadata,
+        }
+
+    best = min(
+        candidates,
+        key=lambda candidate: _camera_fit_error(
+            candidate, observations, aspect_ratio),
+    )
+    best_values = values(best)
+    best_error = _camera_fit_error(best, observations, aspect_ratio)
+    for _ in range(6):
+        improved = True
+        while improved:
+            improved = False
+            for index, step in enumerate(steps):
+                for direction in (-1.0, 1.0):
+                    trial_values = list(best_values)
+                    trial_values[index] = min(
+                        max(trial_values[index] + direction * step, bounds[index][0]),
+                        bounds[index][1],
+                    )
+                    trial = from_values(trial_values)
+                    error = _camera_fit_error(trial, observations, aspect_ratio)
+                    if error + 1e-9 < best_error:
+                        best_values = trial_values
+                        best_error = error
+                        improved = True
+        steps = [step * 0.5 for step in steps]
+    refined = from_values(best_values)
+    reprojection_error = _camera_reprojection_error(
+        refined, observations, aspect_ratio) * 100.0
+    metrics.update({
+        "camera_refined": True,
+        "camera_reprojection_error_percent": reprojection_error,
+        "camera_reliable": reprojection_error <= 8.0,
+    })
+    if reprojection_error > 8.0:
+        warnings.append(
+            f"参考机位重投影误差 {reprojection_error:.1f}%，建议补充侧面图片或手动校正")
+    return refined, metrics
 
 
 def _wall_point_from_image(point, wall, camera, width, depth, aspect_ratio):
@@ -437,9 +715,29 @@ def _deduplicate_furniture(objects, warnings):
                 entity.get("instance_id")
                 and entity["instance_id"] == existing.get("instance_id")
             )
+            entity_half_x, entity_half_z = _rotated_footprint(
+                entity["size"], entity["yaw_degrees"])
+            existing_half_x, existing_half_z = _rotated_footprint(
+                existing["size"], existing["yaw_degrees"])
+            world_distance = math.hypot(
+                entity["position"][0] - existing["position"][0],
+                entity["position"][2] - existing["position"][2],
+            )
+            size_ratio = max(
+                entity_half_x / max(existing_half_x, 0.001),
+                existing_half_x / max(entity_half_x, 0.001),
+                entity_half_z / max(existing_half_z, 0.001),
+                existing_half_z / max(entity_half_z, 0.001),
+            )
+            unsupported_overlap = (
+                (point is None) != (existing_point is None)
+                and world_distance <= 0.2
+                and size_ratio <= 1.3
+            )
             if (
                 same_instance and point_distance <= 0.03
                 or overlap >= 0.92 and point_distance <= 0.012
+                or unsupported_overlap
             ):
                 duplicate = existing
                 break
@@ -452,10 +750,211 @@ def _deduplicate_furniture(objects, warnings):
             kept.append(entity)
             continue
         removed += 1
-        if entity["confidence"] > duplicate["confidence"]:
+        entity_observed = _observation_point(entity) is not None
+        duplicate_observed = _observation_point(duplicate) is not None
+        replace_duplicate = (
+            entity_observed
+            if entity_observed != duplicate_observed
+            else entity["confidence"] > duplicate["confidence"]
+        )
+        if replace_duplicate:
             kept[kept.index(duplicate)] = entity
             duplicate, entity = entity, duplicate
         warnings.append(f"{entity['name']} 与 {duplicate['name']} 属于同一图像实例，已去重")
+    return kept, removed
+
+
+def _touching_image_regions(left, right):
+    if left is None or right is None:
+        return False
+    left_width = max(left[2] - left[0], 1e-6)
+    right_width = max(right[2] - right[0], 1e-6)
+    left_height = max(left[3] - left[1], 1e-6)
+    right_height = max(right[3] - right[1], 1e-6)
+    x_overlap = max(0.0, min(left[2], right[2]) - max(left[0], right[0]))
+    y_overlap = max(0.0, min(left[3], right[3]) - max(left[1], right[1]))
+    x_gap = max(0.0, max(left[0], right[0]) - min(left[2], right[2]))
+    y_gap = max(0.0, max(left[1], right[1]) - min(left[3], right[3]))
+    return (
+        x_overlap >= min(left_width, right_width) * 0.8 and y_gap <= 0.015
+        or y_overlap >= min(left_height, right_height) * 0.8 and x_gap <= 0.015
+    )
+
+
+def _deduplicate_mounted_architecture(
+        objects, warnings, width=None, depth=None, height=None):
+    kept = []
+    removed = 0
+    for entity in objects:
+        if entity["category"] not in _MOUNTED_CATEGORIES:
+            kept.append(entity)
+            continue
+        duplicate = None
+        for existing in kept:
+            if (
+                existing["category"] != entity["category"]
+                or existing.get("wall") != entity.get("wall")
+            ):
+                continue
+            wall_axis = 2 if entity.get("wall") in {"left", "right"} else 0
+            normal_axis = 0 if wall_axis == 2 else 2
+            existing_bounds = existing.get(
+                "_architecture_segment_world_bounds", [
+                    existing["position"][wall_axis]
+                    - existing["size"][wall_axis] * 0.5,
+                    existing["position"][1],
+                    existing["position"][wall_axis]
+                    + existing["size"][wall_axis] * 0.5,
+                    existing["position"][1] + existing["size"][1],
+                ])
+            entity_bounds = [
+                entity["position"][wall_axis]
+                - entity["size"][wall_axis] * 0.5,
+                entity["position"][1],
+                entity["position"][wall_axis]
+                + entity["size"][wall_axis] * 0.5,
+                entity["position"][1] + entity["size"][1],
+            ]
+            wall_overlap = max(
+                0.0,
+                min(existing_bounds[2], entity_bounds[2])
+                - max(existing_bounds[0], entity_bounds[0]),
+            )
+            vertical_overlap = max(
+                0.0,
+                min(existing_bounds[3], entity_bounds[3])
+                - max(existing_bounds[1], entity_bounds[1]),
+            )
+            wall_overlap_ratio = wall_overlap / max(
+                min(
+                    existing_bounds[2] - existing_bounds[0],
+                    entity_bounds[2] - entity_bounds[0],
+                ),
+                1e-6,
+            )
+            vertical_overlap_ratio = vertical_overlap / max(
+                min(
+                    existing_bounds[3] - existing_bounds[1],
+                    entity_bounds[3] - entity_bounds[1],
+                ),
+                1e-6,
+            )
+            normal_distance = abs(
+                entity["position"][normal_axis]
+                - existing["position"][normal_axis])
+            existing_size = existing.get(
+                "_architecture_segment_base_size", existing["size"])
+            size_ratio = max(
+                max(entity["size"][axis], 0.001)
+                / max(existing_size[axis], 0.001)
+                for axis in range(3)
+            )
+            size_ratio = max(size_ratio, max(
+                max(existing_size[axis], 0.001)
+                / max(entity["size"][axis], 0.001)
+                for axis in range(3)
+            ))
+            bboxes_match = (
+                _bbox_iou(entity.get("image_bbox"),
+                          existing.get("image_bbox")) >= 0.75
+                or _touching_image_regions(
+                    entity.get("image_bbox"), existing.get("image_bbox"))
+            )
+            if (
+                normal_distance <= 0.08
+                and wall_overlap_ratio >= 0.7
+                and vertical_overlap_ratio >= 0.7
+                and size_ratio <= 1.3
+                and bboxes_match
+            ):
+                duplicate = existing
+                break
+        if duplicate is None:
+            kept.append(entity)
+            continue
+        removed += 1
+        left = duplicate.get("image_bbox")
+        right = entity.get("image_bbox")
+        if left is not None and right is not None:
+            duplicate.setdefault(
+                "_architecture_segment_base_size", list(duplicate["size"]))
+            duplicate.setdefault(
+                "_architecture_segment_world_bounds", [
+                    duplicate["position"][wall_axis]
+                    - duplicate["size"][wall_axis] * 0.5,
+                    duplicate["position"][1],
+                    duplicate["position"][wall_axis]
+                    + duplicate["size"][wall_axis] * 0.5,
+                    duplicate["position"][1] + duplicate["size"][1],
+                ])
+            duplicate.setdefault(
+                "_architecture_segment_max_bbox",
+                [left[2] - left[0], left[3] - left[1]],
+            )
+            segment_max_bbox = duplicate["_architecture_segment_max_bbox"]
+            segment_max_bbox[0] = max(
+                segment_max_bbox[0], right[2] - right[0])
+            segment_max_bbox[1] = max(
+                segment_max_bbox[1], right[3] - right[1])
+            world_bounds = duplicate["_architecture_segment_world_bounds"]
+            entity_world_bounds = [
+                entity["position"][wall_axis]
+                - entity["size"][wall_axis] * 0.5,
+                entity["position"][1],
+                entity["position"][wall_axis]
+                + entity["size"][wall_axis] * 0.5,
+                entity["position"][1] + entity["size"][1],
+            ]
+            world_bounds[0] = min(world_bounds[0], entity_world_bounds[0])
+            world_bounds[1] = min(world_bounds[1], entity_world_bounds[1])
+            world_bounds[2] = max(world_bounds[2], entity_world_bounds[2])
+            world_bounds[3] = max(world_bounds[3], entity_world_bounds[3])
+            union = [
+                min(left[0], right[0]),
+                min(left[1], right[1]),
+                max(left[2], right[2]),
+                max(left[3], right[3]),
+            ]
+            width_scale = (
+                (union[2] - union[0])
+                / max(segment_max_bbox[0], 1e-6))
+            height_scale = (
+                (union[3] - union[1])
+                / max(segment_max_bbox[1], 1e-6))
+            duplicate["image_bbox"] = union
+            duplicate["floor_contact"] = [
+                (union[0] + union[2]) * 0.5, union[3]]
+            base_size = duplicate["_architecture_segment_base_size"]
+            merged_height = max(
+                world_bounds[3] - world_bounds[1],
+                base_size[1] * height_scale,
+            )
+            if height is not None:
+                merged_height = min(
+                    merged_height, max(0.02, height - world_bounds[1]))
+            duplicate["position"][1] = world_bounds[1]
+            duplicate["size"][1] = merged_height
+            merged_width = max(
+                world_bounds[2] - world_bounds[0],
+                base_size[wall_axis] * width_scale,
+            )
+            wall_limit = depth if wall_axis == 2 else width
+            if wall_limit is not None:
+                merged_width = min(merged_width, wall_limit)
+            duplicate["position"][wall_axis] = (
+                world_bounds[0] + world_bounds[2]) * 0.5
+            duplicate["size"][wall_axis] = merged_width
+        if entity["confidence"] > duplicate["confidence"]:
+            duplicate["confidence"] = entity["confidence"]
+        if entity.get("evidence") == "observed":
+            duplicate["evidence"] = "observed"
+            duplicate["opacity"] = 1.0
+        warnings.append(
+            f"{entity['name']} 与 {duplicate['name']} 是同一墙面开口的重叠分段，已合并")
+    for entity in kept:
+        entity.pop("_architecture_segment_base_size", None)
+        entity.pop("_architecture_segment_max_bbox", None)
+        entity.pop("_architecture_segment_world_bounds", None)
     return kept, removed
 
 
@@ -638,28 +1137,31 @@ def _pack_row_x(row, pair_lookup, width):
     extents = [
         _pair_extents(table, pair_lookup.get(table["id"])) for table in tables
     ]
-    gap = 0.22
-    offsets = [-extents[0][0]]
-    for index in range(1, len(tables)):
-        offsets.append(
-            offsets[-1] + extents[index - 1][1] - extents[index][0] + gap
-        )
-    group_width = offsets[-1] + extents[-1][1]
-    observed_centers = [
-        _table_layout_point(table, pair_lookup)[0] for table in tables
+    gap = 0.12
+    targets = [
+        (_table_layout_point(table, pair_lookup)[0] - 0.5) * width * 0.88
+        for table in tables
     ]
-    desired_center = (
-        sum((center - 0.5) * width * 0.85 for center in observed_centers)
-        / len(observed_centers)
-    )
-    start = min(
-        max(desired_center - group_width * 0.5, -width * 0.5 + 0.08),
-        width * 0.5 - group_width - 0.08,
-    )
-    if group_width > width - 0.16:
-        start = -width * 0.5 + 0.08
-    for table, offset in zip(tables, offsets):
-        target = start + offset
+    for index in range(1, len(targets)):
+        minimum = (
+            targets[index - 1]
+            + extents[index - 1][1] - extents[index][0] + gap
+        )
+        targets[index] = max(targets[index], minimum)
+    for index in range(len(targets) - 2, -1, -1):
+        maximum = (
+            targets[index + 1]
+            - extents[index][1] + extents[index + 1][0] - gap
+        )
+        targets[index] = min(targets[index], maximum)
+    lower = min(
+        target + extent[0] for target, extent in zip(targets, extents))
+    upper = max(
+        target + extent[1] for target, extent in zip(targets, extents))
+    shift = min(max(0.0, -width * 0.5 + 0.08 - lower),
+                width * 0.5 - 0.08 - upper)
+    targets = [target + shift for target in targets]
+    for table, target in zip(tables, targets):
         delta = target - table["position"][0]
         table["position"][0] = target
         chair = pair_lookup.get(table["id"])
@@ -672,41 +1174,41 @@ def _pack_rows_z(rows, pair_lookup, depth):
     for row in rows:
         near = 0.0
         far = 0.0
-        desired = 0.0
+        observed_y = 0.0
         for table in row["tables"]:
             extents = _pair_extents(table, pair_lookup.get(table["id"]))
             near = min(near, extents[2])
             far = max(far, extents[3])
-            desired += table["position"][2]
+            observed_y += _table_layout_point(table, pair_lookup)[1]
         row_shapes.append({
             "row": row,
             "near": -near,
             "far": far,
-            "desired": desired / len(row["tables"]),
+            "desired": (
+                0.6 - observed_y / len(row["tables"])
+            ) * depth * 0.78,
         })
-    gap = 0.16
-    required = sum(shape["near"] + shape["far"] for shape in row_shapes)
-    required += gap * max(0, len(row_shapes) - 1)
-    if len(row_shapes) > 1 and required > depth - 0.16:
-        gap = max(0.04, (depth - 0.16 - sum(
-            shape["near"] + shape["far"] for shape in row_shapes
-        )) / (len(row_shapes) - 1))
-    centers = []
-    cursor = -depth * 0.5 + 0.08
-    for shape in row_shapes:
-        center = cursor + shape["near"]
-        centers.append(center)
-        cursor = center + shape["far"] + gap
-    group_end = cursor - gap + 0.08
-    if group_end < depth * 0.5:
-        desired_center = sum(shape["desired"] for shape in row_shapes) / len(row_shapes)
-        current_center = (centers[0] - row_shapes[0]["near"] + group_end) * 0.5
-        shift = min(
-            max(desired_center - current_center, -depth * 0.5 + 0.08 - (
-                centers[0] - row_shapes[0]["near"])),
-            depth * 0.5 - group_end,
+    gap = 0.12
+    centers = [shape["desired"] for shape in row_shapes]
+    for index in range(1, len(centers)):
+        centers[index] = max(
+            centers[index],
+            centers[index - 1]
+            + row_shapes[index - 1]["far"] + row_shapes[index]["near"] + gap,
         )
-        centers = [center + shift for center in centers]
+    for index in range(len(centers) - 2, -1, -1):
+        centers[index] = min(
+            centers[index],
+            centers[index + 1]
+            - row_shapes[index]["far"] - row_shapes[index + 1]["near"] - gap,
+        )
+    lower = min(
+        center - shape["near"] for center, shape in zip(centers, row_shapes))
+    upper = max(
+        center + shape["far"] for center, shape in zip(centers, row_shapes))
+    shift = min(max(0.0, -depth * 0.5 + 0.08 - lower),
+                depth * 0.5 - 0.08 - upper)
+    centers = [center + shift for center in centers]
     for shape, center in zip(row_shapes, centers):
         for table in shape["row"]["tables"]:
             delta = center - table["position"][2]
@@ -845,7 +1347,7 @@ def _solve_furniture_layout(objects, width, depth, warnings):
 
 
 def normalize_reconstruction_layout(raw, known_room_width_m=0.0, max_objects=36,
-                                    image_aspect_ratio=1.0):
+                                    image_aspect_ratio=1.0, scene_type="室内通用"):
     """Validate model output and return a bounded, metric scene description."""
     if not isinstance(raw, dict):
         raise ValueError("场景布局必须是 JSON 对象")
@@ -890,16 +1392,34 @@ def normalize_reconstruction_layout(raw, known_room_width_m=0.0, max_objects=36,
         "target": camera_target,
         "fov_degrees": camera_fov,
     }
+    try:
+        camera_confidence = _number(
+            camera.get("confidence", 0.5), "camera.confidence", 0.0, 1.0)
+    except ValueError:
+        camera_confidence = 0.5
+    horizon_point = _normalized_point([
+        0.5, camera.get("horizon_y", 0.5)])
+    principal_point = _normalized_point([
+        camera.get("principal_point_x", 0.5), 0.5])
+    horizon_y = horizon_point[1] if horizon_point is not None else 0.5
+    principal_point_x = principal_point[0] if principal_point is not None else 0.5
+    normalized_camera.update({
+        "confidence": camera_confidence,
+        "horizon_y": horizon_y,
+        "principal_point_x": principal_point_x,
+    })
     if (
-        abs(camera_position[0]) >= width * 0.45
-        or abs(camera_target[0]) >= width * 0.45
-        or not 0.8 <= camera_position[1] <= min(3.0, height)
+        not 0.8 <= camera_position[1] <= min(3.0, height)
+        or math.dist(camera_position, camera_target) < 0.2
     ):
-        warnings.append("参考相机位于房间边界或高度不可靠，已改用居中参考机位")
+        warnings.append("参考相机高度或朝向不可靠，已改用居中候选机位")
         normalized_camera = {
             "position": [0, min(max(1.6, height * 0.5), 2.0), -depth * 0.8],
             "target": [0, min(1.2, height * 0.4), 0],
             "fov_degrees": camera_fov,
+            "confidence": camera_confidence,
+            "horizon_y": horizon_y,
+            "principal_point_x": principal_point_x,
         }
     try:
         aspect_ratio = float(image_aspect_ratio)
@@ -919,9 +1439,16 @@ def normalize_reconstruction_layout(raw, known_room_width_m=0.0, max_objects=36,
         if not isinstance(item, dict):
             warnings.append(f"objects[{index}] 不是对象，已跳过")
             continue
+        category = _category(item.get("category"))
+        minimum_size = (
+            0.0
+            if category in _MOUNTED_CATEGORIES | {"table", "chair"}
+            else 0.02
+        )
         try:
             position = _vec3(item.get("position"), f"objects[{index}].position", -200, 200)
-            size = _vec3(item.get("size"), f"objects[{index}].size", 0.02, 100)
+            size = _vec3(
+                item.get("size"), f"objects[{index}].size", minimum_size, 100)
             yaw = _number(
                 item.get("yaw_degrees", 0), f"objects[{index}].yaw_degrees", -3600, 3600)
             object_confidence = _number(
@@ -931,7 +1458,6 @@ def normalize_reconstruction_layout(raw, known_room_width_m=0.0, max_objects=36,
             continue
         position = [component * scale for component in position]
         size = [component * scale for component in size]
-        category = _category(item.get("category"))
         image_bbox = _normalized_bbox(item.get("image_bbox"))
         floor_contact = _normalized_point(item.get("floor_contact"))
         if image_bbox is not None:
@@ -1073,8 +1599,70 @@ def normalize_reconstruction_layout(raw, known_room_width_m=0.0, max_objects=36,
             entity["interaction_anchor"] = anchor
         objects.append(entity)
 
+    objects, deduplicated_architecture = _deduplicate_mounted_architecture(
+        objects, warnings, width, depth, height)
     objects, layout_quality = _solve_furniture_layout(
         objects, width, depth, warnings)
+    normalized_camera, camera_quality = _refine_reference_camera(
+        objects, normalized_camera, width, depth, height, aspect_ratio, warnings)
+    normalized_camera.update({
+        "confidence": camera_confidence,
+        "horizon_y": horizon_y,
+        "principal_point_x": principal_point_x,
+    })
+    mounted = [
+        entity for entity in objects
+        if entity["category"] in _MOUNTED_CATEGORIES
+    ]
+    architecture_quality = {
+        "major_architecture_count": len(mounted),
+        "observed_architecture_count": sum(
+            entity.get("image_bbox") is not None for entity in mounted),
+        "deduplicated_architecture": deduplicated_architecture,
+        "window_count": sum(
+            entity["category"] == "window" for entity in mounted),
+        "board_count": sum(
+            entity["category"] == "board" for entity in mounted),
+        "door_count": sum(
+            entity["category"] == "door" for entity in mounted),
+    }
+    layout_quality.update(camera_quality)
+    layout_quality.update(architecture_quality)
+    order_violations, order_comparisons = _image_order_violations(
+        objects, normalized_camera, aspect_ratio)
+    order_violation_ratio = (
+        order_violations / order_comparisons if order_comparisons else 0.0)
+    layout_quality.update({
+        "image_order_violations": order_violations,
+        "image_order_comparisons": order_comparisons,
+        "image_order_violation_ratio": order_violation_ratio,
+    })
+    normalized_scene_type = str(scene_type or "室内通用").strip()
+    if normalized_scene_type == "教室":
+        missing = []
+        if architecture_quality["window_count"] == 0:
+            missing.append("窗户")
+        if architecture_quality["board_count"] == 0:
+            missing.append("黑板/白板")
+        if missing:
+            warnings.append(
+                "教室关键建筑锚点缺失：" + "、".join(missing)
+                + "；当前结果只能作为家具布局草模")
+    fidelity_limitations = []
+    if not camera_quality["camera_reliable"]:
+        fidelity_limitations.append("reference_camera")
+    if layout_quality["residual_furniture_overlaps"]:
+        fidelity_limitations.append("furniture_overlap")
+    if normalized_scene_type == "教室" and (
+        architecture_quality["window_count"] == 0
+        or architecture_quality["board_count"] == 0
+    ):
+        fidelity_limitations.append("architecture_coverage")
+    if order_violation_ratio > 0.1:
+        fidelity_limitations.append("image_order")
+    layout_quality["previs_fidelity"] = (
+        "limited" if fidelity_limitations else "usable")
+    layout_quality["fidelity_limitations"] = fidelity_limitations
     for entity in objects:
         entity.pop("interaction_anchor", None)
         anchor = _interaction_anchor(
@@ -1092,6 +1680,7 @@ def normalize_reconstruction_layout(raw, known_room_width_m=0.0, max_objects=36,
         "camera": normalized_camera,
         "objects": objects,
         "layout_quality": layout_quality,
+        "scene_type": normalized_scene_type,
         "warnings": warnings,
     }
 
